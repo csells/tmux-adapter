@@ -64,6 +64,7 @@ func (a *Adapter) Start() error {
 	// 7. Start HTTP server
 	mux := http.NewServeMux()
 	mux.Handle("/ws", a.wsSrv)
+	mux.Handle("/", http.FileServer(http.Dir("web")))
 
 	a.httpSrv = &http.Server{
 		Addr:    fmt.Sprintf(":%d", a.port),
@@ -71,6 +72,7 @@ func (a *Adapter) Start() error {
 	}
 
 	go func() {
+		log.Printf("Dashboard at http://localhost:%d/", a.port)
 		log.Printf("WebSocket server listening on ws://localhost:%d/ws", a.port)
 		log.Printf("watching gastown at %s", a.gtDir)
 		if err := a.httpSrv.ListenAndServe(); err != http.ErrServerClosed {
