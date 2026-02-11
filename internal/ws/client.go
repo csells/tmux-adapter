@@ -7,17 +7,21 @@ import (
 	"sync"
 
 	"nhooyr.io/websocket"
-
-	"github.com/gastownhall/tmux-adapter/internal/vt"
 )
+
+// outMsg wraps a WebSocket message with its type (text or binary).
+type outMsg struct {
+	typ  websocket.MessageType
+	data []byte
+}
 
 // Client represents a single WebSocket connection.
 type Client struct {
 	conn       *websocket.Conn
 	server     *Server
-	send       chan []byte
-	agentSub   bool                                // subscribed to agent lifecycle
-	outputSubs map[string]<-chan *vt.ScreenUpdate   // agent name -> screen update channel
+	send       chan outMsg
+	agentSub   bool                    // subscribed to agent lifecycle
+	outputSubs map[string]<-chan []byte // agent name -> raw byte channel
 	mu         sync.Mutex
 	ctx        context.Context
 	cancel     context.CancelFunc
@@ -28,8 +32,8 @@ func NewClient(conn *websocket.Conn, server *Server, ctx context.Context, cancel
 	return &Client{
 		conn:       conn,
 		server:     server,
-		send:       make(chan []byte, 256),
-		outputSubs: make(map[string]<-chan *vt.ScreenUpdate),
+		send:       make(chan outMsg, 256),
+		outputSubs: make(map[string]<-chan []byte),
 		ctx:        ctx,
 		cancel:     cancel,
 	}
@@ -40,9 +44,14 @@ func (c *Client) ReadPump() {
 	defer c.cancel()
 
 	for {
-		_, data, err := c.conn.Read(c.ctx)
+		typ, data, err := c.conn.Read(c.ctx)
 		if err != nil {
 			return
+		}
+
+		if typ == websocket.MessageBinary {
+			handleBinaryMessage(c, data)
+			continue
 		}
 
 		var req Request
@@ -67,20 +76,28 @@ func (c *Client) WritePump() {
 			if !ok {
 				return
 			}
-			if err := c.conn.Write(c.ctx, websocket.MessageText, msg); err != nil {
+			if err := c.conn.Write(c.ctx, msg.typ, msg.data); err != nil {
 				return
 			}
 		}
 	}
 }
 
-// Send queues a message for sending to this client.
-func (c *Client) Send(msg []byte) {
+// SendText queues a text message for sending to this client.
+func (c *Client) SendText(msg []byte) {
 	select {
-	case c.send <- msg:
+	case c.send <- outMsg{typ: websocket.MessageText, data: msg}:
 	default:
-		// Client is slow — drop message
 		log.Printf("dropping message for slow client")
+	}
+}
+
+// SendBinary queues a binary message for sending to this client.
+func (c *Client) SendBinary(data []byte) {
+	select {
+	case c.send <- outMsg{typ: websocket.MessageBinary, data: data}:
+	default:
+		log.Printf("dropping binary message for slow client")
 	}
 }
 
@@ -91,7 +108,7 @@ func (c *Client) sendJSON(v any) {
 		log.Printf("marshal error: %v", err)
 		return
 	}
-	c.Send(data)
+	c.SendText(data)
 }
 
 // sendError sends an error response.

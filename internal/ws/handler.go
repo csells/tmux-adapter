@@ -1,12 +1,15 @@
 package ws
 
 import (
+	"bytes"
 	"encoding/json"
+	"log"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/gastownhall/tmux-adapter/internal/agents"
-	"github.com/gastownhall/tmux-adapter/internal/vt"
 )
 
 // Request is a message from a WebSocket client.
@@ -20,19 +23,23 @@ type Request struct {
 
 // Response is a message sent to a WebSocket client.
 type Response struct {
-	ID      string             `json:"id,omitempty"`
-	Type    string             `json:"type"`
-	OK      *bool              `json:"ok,omitempty"`
-	Error   string             `json:"error,omitempty"`
-	Agents  []agents.Agent     `json:"agents,omitempty"`
-	History string             `json:"history,omitempty"`
-	Screen  *vt.ScreenSnapshot `json:"screen,omitempty"`
-	Agent   *agents.Agent      `json:"agent,omitempty"`
-	Name    string             `json:"name,omitempty"`
-	Data    string             `json:"data,omitempty"`
-	Rows    map[int]string     `json:"rows,omitempty"`
-	Cursor  *[2]int            `json:"cursor,omitempty"`
+	ID      string         `json:"id,omitempty"`
+	Type    string         `json:"type"`
+	OK      *bool          `json:"ok,omitempty"`
+	Error   string         `json:"error,omitempty"`
+	Agents  []agents.Agent `json:"agents,omitempty"`
+	History string         `json:"history,omitempty"`
+	Agent   *agents.Agent  `json:"agent,omitempty"`
+	Name    string         `json:"name,omitempty"`
+	Data    string         `json:"data,omitempty"`
 }
+
+// Binary protocol message types
+const (
+	BinaryTerminalOutput byte = 0x01 // server → client: terminal output
+	BinaryKeyboardInput  byte = 0x02 // client → server: keyboard input
+	BinaryResize         byte = 0x03 // client → server: resize
+)
 
 // Per-agent mutexes for send-prompt serialization.
 var (
@@ -49,7 +56,7 @@ func getNudgeLock(agent string) *sync.Mutex {
 	return nudgeLocks[agent]
 }
 
-// handleMessage routes a request to the appropriate handler.
+// handleMessage routes a text request to the appropriate handler.
 func handleMessage(c *Client, req Request) {
 	switch req.Type {
 	case "list-agents":
@@ -67,6 +74,53 @@ func handleMessage(c *Client, req Request) {
 	default:
 		c.sendError(req.ID, "unknown message type: "+req.Type)
 	}
+}
+
+// handleBinaryMessage routes binary WebSocket frames.
+// Format: msgType(1 byte) + agentName + \0 + payload
+func handleBinaryMessage(c *Client, data []byte) {
+	if len(data) < 3 {
+		return
+	}
+
+	msgType := data[0]
+	rest := data[1:]
+
+	// Split agent name and payload on null byte
+	idx := bytes.IndexByte(rest, 0)
+	if idx < 0 {
+		return
+	}
+	agentName := string(rest[:idx])
+	payload := rest[idx+1:]
+
+	switch msgType {
+	case BinaryKeyboardInput:
+		c.server.ctrl.SendKeysLiteral(agentName, string(payload))
+	case BinaryResize:
+		parts := strings.SplitN(string(payload), ":", 2)
+		if len(parts) != 2 {
+			return
+		}
+		cols, err1 := strconv.Atoi(parts[0])
+		rows, err2 := strconv.Atoi(parts[1])
+		if err1 != nil || err2 != nil {
+			return
+		}
+		c.server.ctrl.ResizePaneTo(agentName, cols, rows)
+	default:
+		log.Printf("unknown binary message type: 0x%02x", msgType)
+	}
+}
+
+// makeBinaryFrame builds a binary frame: msgType + agentName + \0 + payload
+func makeBinaryFrame(msgType byte, agentName string, payload []byte) []byte {
+	frame := make([]byte, 0, 1+len(agentName)+1+len(payload))
+	frame = append(frame, msgType)
+	frame = append(frame, []byte(agentName)...)
+	frame = append(frame, 0)
+	frame = append(frame, payload...)
+	return frame
 }
 
 func handleListAgents(c *Client, req Request) {
@@ -175,46 +229,46 @@ func handleSubscribeOutput(c *Client, req Request) {
 	// Check if streaming is requested (default: true)
 	wantStream := req.Stream == nil || *req.Stream
 
-	var screen *vt.ScreenSnapshot
-
 	if wantStream {
-		// Subscribe to pipe-pane output (now returns screen updates + initial snapshot)
-		ch, snap, err := c.server.pipeMgr.Subscribe(req.Agent)
+		// Subscribe to pipe-pane raw bytes
+		ch, err := c.server.pipeMgr.Subscribe(req.Agent)
 		if err != nil {
 			okVal := false
 			c.sendJSON(Response{ID: req.ID, Type: "subscribe-output", OK: &okVal, Error: err.Error()})
 			return
 		}
 
-		screen = snap
-
 		c.mu.Lock()
 		c.outputSubs[req.Agent] = ch
 		c.mu.Unlock()
 
-		// Stream screen updates in background
+		// Send JSON success response
+		okVal := true
+		c.sendJSON(Response{
+			ID:   req.ID,
+			Type: "subscribe-output",
+			OK:   &okVal,
+		})
+
+		// Send binary history frame: convert \n to \r\n for xterm compat
+		historyBytes := []byte(strings.ReplaceAll(history, "\n", "\r\n"))
+		c.SendBinary(makeBinaryFrame(BinaryTerminalOutput, req.Agent, historyBytes))
+
+		// Stream raw bytes in background
 		go func() {
-			for update := range ch {
-				cursor := [2]int{update.CursorRow, update.CursorCol}
-				event, _ := json.Marshal(Response{
-					Type:   "screen-update",
-					Name:   req.Agent,
-					Rows:   update.Rows,
-					Cursor: &cursor,
-				})
-				c.Send(event)
+			for rawBytes := range ch {
+				c.SendBinary(makeBinaryFrame(BinaryTerminalOutput, req.Agent, rawBytes))
 			}
 		}()
+	} else {
+		okVal := true
+		c.sendJSON(Response{
+			ID:      req.ID,
+			Type:    "subscribe-output",
+			OK:      &okVal,
+			History: history,
+		})
 	}
-
-	okVal := true
-	c.sendJSON(Response{
-		ID:      req.ID,
-		Type:    "subscribe-output",
-		OK:      &okVal,
-		History: history,
-		Screen:  screen,
-	})
 }
 
 func handleUnsubscribeOutput(c *Client, req Request) {

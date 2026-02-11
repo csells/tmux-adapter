@@ -119,7 +119,7 @@
   .role-polecat  { background: #79c0ff; }
   .role-boot     { background: #8b949e; }
 
-  /* --- Right panel: output viewer --- */
+  /* --- Right panel: terminal viewer --- */
   .main {
     display: flex;
     flex-direction: column;
@@ -149,49 +149,14 @@
     position: relative;
   }
 
-  .output {
+  .terminal-wrapper {
     width: 100%;
     height: 100%;
-    overflow-y: auto;
-    padding: 0;
-    font-size: 13px;
-    line-height: 1.5;
-    color: #c9d1d9;
-    scrollbar-width: thin;
-    scrollbar-color: #30363d #0d1117;
-    display: flex;
-    flex-direction: column;
+    display: none;
   }
 
-  .output::-webkit-scrollbar { width: 8px; }
-  .output::-webkit-scrollbar-track { background: #0d1117; }
-  .output::-webkit-scrollbar-thumb { background: #30363d; border-radius: 4px; }
-
-  .scrollback {
-    padding: 8px 16px 0 16px;
-    flex-shrink: 0;
-  }
-
-  .scrollback .screen-row {
-    height: 1.5em;
-    white-space: pre;
-    overflow: hidden;
-  }
-
-  .screen-grid {
-    padding: 4px 16px;
-    flex-shrink: 0;
-  }
-
-  .screen-grid .screen-row {
-    height: 1.5em;
-    white-space: pre;
-    overflow: hidden;
-  }
-
-  .screen-grid .screen-cursor {
-    background: #c9d1d9;
-    color: #0d1117;
+  .terminal-wrapper.active {
+    display: block;
   }
 
   .placeholder {
@@ -202,44 +167,6 @@
     color: #484f58;
     font-size: 14px;
   }
-
-  .prompt-bar {
-    display: flex;
-    border-top: 1px solid #30363d;
-    background: #161b22;
-    padding: 10px 16px;
-    gap: 8px;
-  }
-
-  .prompt-bar input {
-    flex: 1;
-    background: #0d1117;
-    border: 1px solid #30363d;
-    border-radius: 6px;
-    padding: 8px 12px;
-    color: #e6edf3;
-    font-family: inherit;
-    font-size: 13px;
-    outline: none;
-  }
-
-  .prompt-bar input:focus { border-color: #58a6ff; }
-  .prompt-bar input:disabled { opacity: 0.4; }
-
-  .prompt-bar button {
-    background: #238636;
-    border: none;
-    border-radius: 6px;
-    padding: 8px 16px;
-    color: #fff;
-    font-family: inherit;
-    font-size: 13px;
-    font-weight: 600;
-    cursor: pointer;
-  }
-
-  .prompt-bar button:hover { background: #2ea043; }
-  .prompt-bar button:disabled { opacity: 0.4; cursor: default; }
 
   .empty-sidebar {
     padding: 16px;
@@ -265,528 +192,307 @@
     <div class="main-header" id="main-header">
       Select an agent to view output
     </div>
-    <div class="output-wrap">
-      <div id="output" class="output">
-        <div class="placeholder">Select an agent from the sidebar</div>
-      </div>
-    </div>
-    <div class="prompt-bar">
-      <input type="text" id="prompt-input" placeholder="Send a prompt..." disabled>
-      <button id="send-btn" disabled>Send</button>
+    <div class="output-wrap" id="output-wrap">
+      <div class="placeholder" id="placeholder">Select an agent from the sidebar</div>
     </div>
   </div>
 </div>
 
-<script>
-(function() {
-  // --- State ---
-  var agents = new Map();       // name -> agent object
-  var selectedAgent = null;     // name of currently selected agent
-  var msgId = 0;                // monotonic message id
-  var ws = null;
-  var userScrolledUp = false;
-  var screenRows = new Map();   // row index -> raw text with ANSI codes
-  var screenMeta = { cols: 80, numRows: 24, cursor: [0, 0] };
-  var pendingPrompt = null;     // queued prompt for retry on reconnect
+<script type="module">
+import { init, Terminal } from 'https://cdn.jsdelivr.net/npm/ghostty-web/+esm';
+await init();
 
-  // --- DOM refs ---
-  var agentListEl  = document.getElementById('agent-list');
-  var outputEl     = document.getElementById('output');
-  var mainHeaderEl = document.getElementById('main-header');
-  var promptInput  = document.getElementById('prompt-input');
-  var sendBtn      = document.getElementById('send-btn');
-  var statusDot    = document.getElementById('status-dot');
-  var statusText   = document.getElementById('status-text');
+// --- State ---
+var agents = new Map();       // name -> agent object
+var selectedAgent = null;     // name of currently selected agent
+var terminals = new Map();    // name -> { terminal, wrapper }
+var msgId = 0;                // monotonic message id
+var ws = null;
 
-  // Scrollback and screen-grid containers (created on demand)
-  var scrollbackEl = null;
-  var screenGridEl = null;
+// --- DOM refs ---
+var agentListEl  = document.getElementById('agent-list');
+var outputWrapEl = document.getElementById('output-wrap');
+var mainHeaderEl = document.getElementById('main-header');
+var placeholderEl = document.getElementById('placeholder');
+var statusDot    = document.getElementById('status-dot');
+var statusText   = document.getElementById('status-text');
 
-  // --- ANSI SGR color tables ---
-  var STANDARD_COLORS = ['#282c34','#e06c75','#98c379','#e5c07b','#61afef','#c678dd','#56b6c2','#abb2bf'];
-  var BRIGHT_COLORS   = ['#5c6370','#be5046','#7ec168','#d19a66','#528bff','#b668cd','#3fc5d4','#ffffff'];
+// --- Helpers: safe DOM construction ---
+function createBadge(text, classNames) {
+  var el = document.createElement('span');
+  el.textContent = text;
+  el.className = classNames;
+  return el;
+}
 
-  function color256(n) {
-    if (n < 8) return STANDARD_COLORS[n];
-    if (n < 16) return BRIGHT_COLORS[n - 8];
-    if (n < 232) {
-      var idx = n - 16;
-      var b = idx % 6; idx = (idx - b) / 6;
-      var g = idx % 6; idx = (idx - g) / 6;
-      var r = idx;
-      var toHex = function(v) { var h = (v === 0 ? 0 : 55 + v * 40).toString(16); return h.length < 2 ? '0' + h : h; };
-      return '#' + toHex(r) + toHex(g) + toHex(b);
-    }
-    var level = 8 + (n - 232) * 10;
-    var hex = level.toString(16);
-    if (hex.length < 2) hex = '0' + hex;
-    return '#' + hex + hex + hex;
-  }
+function clearChildren(el) {
+  while (el.firstChild) el.removeChild(el.firstChild);
+}
 
-  // --- ANSI SGR parser ---
-  function parseAnsiRow(text) {
-    var spans = [];
-    var state = { bold: false, italic: false, underline: false, fg: null, bg: null };
-    var re = /\x1b\[([\d;]*)m/g;
-    var lastIndex = 0;
-    var match;
+// --- Terminal management ---
+function getOrCreateTerminal(agentName) {
+  var cached = terminals.get(agentName);
+  if (cached) return cached;
 
-    function makeSpan(str) {
-      var span = document.createElement('span');
-      span.textContent = str;
-      var styles = '';
-      if (state.bold) styles += 'font-weight:bold;';
-      if (state.italic) styles += 'font-style:italic;';
-      if (state.underline) styles += 'text-decoration:underline;';
-      if (state.fg) styles += 'color:' + state.fg + ';';
-      if (state.bg) styles += 'background:' + state.bg + ';';
-      if (styles) span.setAttribute('style', styles);
-      return span;
-    }
+  var terminal = new Terminal({ fontSize: 13, theme: { background: '#0d1117' } });
+  var wrapper = document.createElement('div');
+  wrapper.className = 'terminal-wrapper';
+  outputWrapEl.appendChild(wrapper);
+  terminal.open(wrapper);
 
-    while ((match = re.exec(text)) !== null) {
-      if (match.index > lastIndex) {
-        spans.push(makeSpan(text.substring(lastIndex, match.index)));
-      }
-      lastIndex = re.lastIndex;
+  // Keyboard input -> server via binary
+  terminal.onData(function(data) {
+    var payload = new TextEncoder().encode(data);
+    sendBinary(0x02, agentName, payload);
+  });
 
-      var params = match[1] === '' ? [0] : match[1].split(';').map(Number);
-      for (var i = 0; i < params.length; i++) {
-        var p = params[i];
-        if (p === 0) {
-          state.bold = false; state.italic = false; state.underline = false;
-          state.fg = null; state.bg = null;
-        } else if (p === 1) {
-          state.bold = true;
-        } else if (p === 3) {
-          state.italic = true;
-        } else if (p === 4) {
-          state.underline = true;
-        } else if (p === 22) {
-          state.bold = false;
-        } else if (p === 23) {
-          state.italic = false;
-        } else if (p === 24) {
-          state.underline = false;
-        } else if (p >= 30 && p <= 37) {
-          state.fg = STANDARD_COLORS[p - 30];
-        } else if (p === 38) {
-          if (params[i + 1] === 5 && i + 2 < params.length) {
-            state.fg = color256(params[i + 2]);
-            i += 2;
-          } else if (params[i + 1] === 2 && i + 4 < params.length) {
-            state.fg = 'rgb(' + params[i + 2] + ',' + params[i + 3] + ',' + params[i + 4] + ')';
-            i += 4;
-          }
-        } else if (p === 39) {
-          state.fg = null;
-        } else if (p >= 40 && p <= 47) {
-          state.bg = STANDARD_COLORS[p - 40];
-        } else if (p === 48) {
-          if (params[i + 1] === 5 && i + 2 < params.length) {
-            state.bg = color256(params[i + 2]);
-            i += 2;
-          } else if (params[i + 1] === 2 && i + 4 < params.length) {
-            state.bg = 'rgb(' + params[i + 2] + ',' + params[i + 3] + ',' + params[i + 4] + ')';
-            i += 4;
-          }
-        } else if (p === 49) {
-          state.bg = null;
-        } else if (p >= 90 && p <= 97) {
-          state.fg = BRIGHT_COLORS[p - 90];
-        }
-      }
-    }
+  // Terminal resize -> server via binary
+  terminal.onResize(function(size) {
+    var payload = new TextEncoder().encode(size.cols + ':' + size.rows);
+    sendBinary(0x03, agentName, payload);
+  });
 
-    if (lastIndex < text.length) {
-      spans.push(makeSpan(text.substring(lastIndex)));
-    }
+  var entry = { terminal: terminal, wrapper: wrapper };
+  terminals.set(agentName, entry);
+  return entry;
+}
 
-    if (spans.length === 0) {
-      spans.push(document.createElement('span'));
-    }
+function showTerminal(agentName) {
+  // Hide all terminal wrappers
+  terminals.forEach(function(entry) {
+    entry.wrapper.classList.remove('active');
+  });
 
-    return spans;
-  }
+  // Show or create the target terminal
+  var entry = getOrCreateTerminal(agentName);
+  entry.wrapper.classList.add('active');
+  placeholderEl.style.display = 'none';
+}
 
-  // --- Screen rendering ---
-  function ensureScreenLayout() {
-    if (scrollbackEl && screenGridEl) return;
+function hideAllTerminals() {
+  terminals.forEach(function(entry) {
+    entry.wrapper.classList.remove('active');
+  });
+  placeholderEl.style.display = '';
+}
 
-    clearChildren(outputEl);
-    scrollbackEl = document.createElement('div');
-    scrollbackEl.className = 'scrollback';
-    outputEl.appendChild(scrollbackEl);
+// --- Binary protocol ---
+function sendBinary(type, agentName, payload) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  var nameBytes = new TextEncoder().encode(agentName);
+  var buf = new Uint8Array(1 + nameBytes.length + 1 + payload.length);
+  buf[0] = type;
+  buf.set(nameBytes, 1);
+  buf[1 + nameBytes.length] = 0; // null separator
+  buf.set(payload, 1 + nameBytes.length + 1);
+  ws.send(buf.buffer);
+}
 
-    screenGridEl = document.createElement('div');
-    screenGridEl.className = 'screen-grid';
-    outputEl.appendChild(screenGridEl);
+function parseBinaryMessage(buffer) {
+  var bytes = new Uint8Array(buffer);
+  var msgType = bytes[0];
 
-    for (var i = 0; i < screenMeta.numRows; i++) {
-      var row = document.createElement('div');
-      row.className = 'screen-row';
-      row.appendChild(document.createElement('span'));
-      screenGridEl.appendChild(row);
-    }
-  }
+  // Find null terminator after agent name
+  var nullIdx = 1;
+  while (nullIdx < bytes.length && bytes[nullIdx] !== 0) nullIdx++;
 
-  function renderScreenRow(rowIndex) {
-    if (!screenGridEl) return;
-    if (rowIndex < 0 || rowIndex >= screenMeta.numRows) return;
-    var rowDiv = screenGridEl.children[rowIndex];
-    if (!rowDiv) return;
-    clearChildren(rowDiv);
-    var text = screenRows.get(rowIndex) || '';
-    var spans = parseAnsiRow(text);
-    spans.forEach(function(span) { rowDiv.appendChild(span); });
-  }
+  var agentName = new TextDecoder().decode(bytes.slice(1, nullIdx));
+  var payload = bytes.slice(nullIdx + 1);
 
-  function renderFullScreen(screenData) {
-    if (!screenData) return;
-    screenMeta.cols = screenData.cols || 80;
-    screenMeta.numRows = screenData.numRows || 24;
-    screenMeta.cursor = screenData.cursor || [0, 0];
+  return { msgType: msgType, agentName: agentName, payload: payload };
+}
 
-    if (screenGridEl && screenGridEl.children.length !== screenMeta.numRows) {
-      clearChildren(screenGridEl);
-      for (var i = 0; i < screenMeta.numRows; i++) {
-        var row = document.createElement('div');
-        row.className = 'screen-row';
-        row.appendChild(document.createElement('span'));
-        screenGridEl.appendChild(row);
-      }
-    }
+// --- WebSocket ---
+function connect() {
+  var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  ws = new WebSocket(proto + '//' + location.host + '/ws');
+  ws.binaryType = 'arraybuffer';
 
-    screenRows.clear();
-    if (screenData.rows) {
-      var keys = Object.keys(screenData.rows);
-      for (var k = 0; k < keys.length; k++) {
-        screenRows.set(Number(keys[k]), screenData.rows[keys[k]]);
-      }
-    }
+  ws.onopen = function() {
+    statusDot.classList.remove('disconnected');
+    statusText.textContent = 'Connected';
+    send({ type: 'subscribe-agents' });
 
-    for (var r = 0; r < screenMeta.numRows; r++) {
-      renderScreenRow(r);
-    }
-  }
-
-  function applyScreenUpdate(msg) {
-    if (msg.cursor) screenMeta.cursor = msg.cursor;
-    if (msg.rows) {
-      var keys = Object.keys(msg.rows);
-      for (var k = 0; k < keys.length; k++) {
-        var idx = Number(keys[k]);
-        screenRows.set(idx, msg.rows[keys[k]]);
-        renderScreenRow(idx);
-      }
-    }
-  }
-
-  // --- History rendering ---
-  function renderHistory(text) {
-    if (!scrollbackEl) return;
-    clearChildren(scrollbackEl);
-    var lines = text.split('\n');
-    for (var i = 0; i < lines.length; i++) {
-      var lineDiv = document.createElement('div');
-      lineDiv.className = 'screen-row';
-      var spans = parseAnsiRow(lines[i]);
-      spans.forEach(function(span) { lineDiv.appendChild(span); });
-      scrollbackEl.appendChild(lineDiv);
-    }
-  }
-
-  // --- Helpers: safe DOM construction ---
-  function createBadge(text, classNames) {
-    var el = document.createElement('span');
-    el.textContent = text;
-    el.className = classNames;
-    return el;
-  }
-
-  function clearChildren(el) {
-    while (el.firstChild) el.removeChild(el.firstChild);
-  }
-
-  // --- WebSocket ---
-  function connect() {
-    var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    ws = new WebSocket(proto + '//' + location.host + '/ws');
-
-    ws.onopen = function() {
-      statusDot.classList.remove('disconnected');
-      statusText.textContent = 'Connected';
-      send({ type: 'subscribe-agents' });
-
-      // Re-subscribe to selected agent's output
-      if (selectedAgent) {
-        clearChildren(outputEl);
-        scrollbackEl = null;
-        screenGridEl = null;
-        screenRows.clear();
-        send({ type: 'subscribe-output', agent: selectedAgent });
-      }
-
-      // Flush pending prompt
-      if (pendingPrompt) {
-        var p = pendingPrompt;
-        pendingPrompt = null;
-        promptInput.placeholder = 'Send a prompt...';
-        send({ type: 'send-prompt', agent: p.agent, prompt: p.prompt });
-      }
-    };
-
-    ws.onclose = function() {
-      statusDot.classList.add('disconnected');
-      statusText.textContent = 'Disconnected';
-
-      // If a send-prompt was in flight, re-queue it
-      if (pendingSendId) {
-        pendingSendId = null;
-        var text = promptInput.value.trim();
-        if (text && selectedAgent) {
-          pendingPrompt = { agent: selectedAgent, prompt: text };
-          promptInput.value = '';
-          promptInput.placeholder = 'Queued — will send on reconnect...';
-        }
-        promptInput.disabled = false;
-        sendBtn.disabled = false;
-      }
-
-      setTimeout(connect, 2000);
-    };
-
-    ws.onmessage = function(ev) {
-      var msg = JSON.parse(ev.data);
-      handleMessage(msg);
-    };
-  }
-
-  function send(obj) {
-    if (!ws || ws.readyState !== WebSocket.OPEN) return null;
-    obj.id = String(++msgId);
-    ws.send(JSON.stringify(obj));
-    return obj.id;
-  }
-
-  // --- Message handling ---
-  function handleMessage(msg) {
-    switch (msg.type) {
-      case 'subscribe-agents':
-        if (msg.agents) msg.agents.forEach(function(a) { agents.set(a.name, a); });
-        renderAgentList();
-        break;
-
-      case 'agent-added':
-        if (msg.agent) agents.set(msg.agent.name, msg.agent);
-        renderAgentList();
-        break;
-
-      case 'agent-removed':
-        var removedName = msg.name || (msg.agent && msg.agent.name);
-        if (removedName) {
-          agents.delete(removedName);
-          if (selectedAgent === removedName) deselectAgent();
-        }
-        renderAgentList();
-        break;
-
-      case 'agent-updated':
-        if (msg.agent) agents.set(msg.agent.name, msg.agent);
-        renderAgentList();
-        if (msg.agent && msg.agent.name === selectedAgent) updateHeader();
-        break;
-
-      case 'subscribe-output':
-        ensureScreenLayout();
-        if (msg.history !== undefined) {
-          renderHistory(msg.history);
-        }
-        if (msg.screen) {
-          renderFullScreen(msg.screen);
-        }
-        scrollToBottom();
-        break;
-
-      case 'screen-update':
-        if (msg.name === selectedAgent) {
-          applyScreenUpdate(msg);
-          if (!userScrolledUp) scrollToBottom();
-        }
-        break;
-
-      case 'output':
-        // Backward compat fallback for raw byte streaming
-        if (msg.name === selectedAgent && msg.data) {
-          ensureScreenLayout();
-          scrollbackEl.textContent += msg.data;
-          if (!userScrolledUp) scrollToBottom();
-        }
-        break;
-
-      case 'send-prompt':
-        if (msg.id === pendingSendId) {
-          pendingSendId = null;
-          promptInput.disabled = false;
-          sendBtn.disabled = false;
-          if (msg.ok) {
-            promptInput.value = '';
-          } else {
-            // Show error — keep text in input so user can retry
-            promptInput.placeholder = 'Error: ' + (msg.error || 'send failed') + ' — try again';
-          }
-          promptInput.focus();
-        }
-        break;
-    }
-  }
-
-  // --- Agent list rendering (safe DOM methods) ---
-  function renderAgentList() {
-    clearChildren(agentListEl);
-
-    if (agents.size === 0) {
-      var empty = document.createElement('div');
-      empty.className = 'empty-sidebar';
-      empty.textContent = 'No agents running';
-      agentListEl.appendChild(empty);
-      return;
-    }
-
-    var sorted = Array.from(agents.values()).sort(function(a, b) {
-      return a.name.localeCompare(b.name);
-    });
-
-    sorted.forEach(function(agent) {
-      var card = document.createElement('div');
-      card.className = 'agent-card' + (agent.name === selectedAgent ? ' selected' : '');
-      card.addEventListener('click', function() { selectAgent(agent.name); });
-
-      // Name row
-      var nameRow = document.createElement('div');
-      nameRow.className = 'agent-name';
-      nameRow.appendChild(createBadge(agent.role || '?', 'badge badge-role role-' + (agent.role || 'boot')));
-      var nameSpan = document.createElement('span');
-      nameSpan.textContent = agent.name;
-      nameRow.appendChild(nameSpan);
-      card.appendChild(nameRow);
-
-      // Meta row
-      var metaRow = document.createElement('div');
-      metaRow.className = 'agent-meta';
-      metaRow.appendChild(createBadge(agent.runtime || '?', 'badge-runtime'));
-      if (agent.attached) {
-        metaRow.appendChild(createBadge('attached', 'badge badge-attached'));
-      }
-      card.appendChild(metaRow);
-
-      agentListEl.appendChild(card);
-    });
-  }
-
-  // --- Agent selection ---
-  function selectAgent(name) {
-    if (selectedAgent === name) return;
-
-    // Unsubscribe from previous
+    // Re-subscribe to selected agent's output
     if (selectedAgent) {
-      send({ type: 'unsubscribe-output', agent: selectedAgent });
+      send({ type: 'subscribe-output', agent: selectedAgent });
     }
+  };
 
-    selectedAgent = name;
-    clearChildren(outputEl);
-    scrollbackEl = null;
-    screenGridEl = null;
-    screenRows.clear();
-    userScrolledUp = false;
-    updateHeader();
-    renderAgentList();
+  ws.onclose = function() {
+    statusDot.classList.add('disconnected');
+    statusText.textContent = 'Disconnected';
+    setTimeout(connect, 2000);
+  };
 
-    // Enable prompt
-    promptInput.disabled = false;
-    sendBtn.disabled = false;
+  ws.onmessage = function(ev) {
+    if (typeof ev.data === 'string') {
+      handleJsonMessage(JSON.parse(ev.data));
+    } else if (ev.data instanceof ArrayBuffer) {
+      handleBinaryMessage(ev.data);
+    }
+  };
+}
 
-    // Subscribe to new agent output
-    send({ type: 'subscribe-output', agent: name });
+function send(obj) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return null;
+  obj.id = String(++msgId);
+  ws.send(JSON.stringify(obj));
+  return obj.id;
+}
+
+// --- Binary message handling ---
+function handleBinaryMessage(buffer) {
+  var parsed = parseBinaryMessage(buffer);
+
+  if (parsed.msgType === 0x01) {
+    // Terminal output — write to the agent's terminal
+    var entry = terminals.get(parsed.agentName);
+    if (entry) {
+      entry.terminal.write(parsed.payload);
+    }
+  }
+}
+
+// --- JSON message handling ---
+function handleJsonMessage(msg) {
+  switch (msg.type) {
+    case 'subscribe-agents':
+      if (msg.agents) msg.agents.forEach(function(a) { agents.set(a.name, a); });
+      renderAgentList();
+      break;
+
+    case 'agent-added':
+      if (msg.agent) agents.set(msg.agent.name, msg.agent);
+      renderAgentList();
+      break;
+
+    case 'agent-removed':
+      var removedName = msg.name || (msg.agent && msg.agent.name);
+      if (removedName) {
+        agents.delete(removedName);
+        // Clean up terminal
+        var removed = terminals.get(removedName);
+        if (removed) {
+          removed.wrapper.remove();
+          terminals.delete(removedName);
+        }
+        if (selectedAgent === removedName) deselectAgent();
+      }
+      renderAgentList();
+      break;
+
+    case 'agent-updated':
+      if (msg.agent) agents.set(msg.agent.name, msg.agent);
+      renderAgentList();
+      if (msg.agent && msg.agent.name === selectedAgent) updateHeader();
+      break;
+
+    case 'subscribe-output':
+      // Server confirms subscription — history arrives as binary 0x01
+      break;
+
+    case 'send-prompt':
+      // Acknowledgment of programmatic prompt send
+      break;
+  }
+}
+
+// --- Agent list rendering (safe DOM methods) ---
+function renderAgentList() {
+  clearChildren(agentListEl);
+
+  if (agents.size === 0) {
+    var empty = document.createElement('div');
+    empty.className = 'empty-sidebar';
+    empty.textContent = 'No agents running';
+    agentListEl.appendChild(empty);
+    return;
   }
 
-  function deselectAgent() {
-    selectedAgent = null;
-    scrollbackEl = null;
-    screenGridEl = null;
-    screenRows.clear();
-    clearChildren(outputEl);
-    var ph = document.createElement('div');
-    ph.className = 'placeholder';
-    ph.textContent = 'Select an agent from the sidebar';
-    outputEl.appendChild(ph);
+  var sorted = Array.from(agents.values()).sort(function(a, b) {
+    return a.name.localeCompare(b.name);
+  });
 
-    clearChildren(mainHeaderEl);
-    mainHeaderEl.textContent = 'Select an agent to view output';
+  sorted.forEach(function(agent) {
+    var card = document.createElement('div');
+    card.className = 'agent-card' + (agent.name === selectedAgent ? ' selected' : '');
+    card.addEventListener('click', function() { selectAgent(agent.name); });
 
-    promptInput.disabled = true;
-    sendBtn.disabled = true;
-    renderAgentList();
-  }
+    // Name row
+    var nameRow = document.createElement('div');
+    nameRow.className = 'agent-name';
+    nameRow.appendChild(createBadge(agent.role || '?', 'badge badge-role role-' + (agent.role || 'boot')));
+    var nameSpan = document.createElement('span');
+    nameSpan.textContent = agent.name;
+    nameRow.appendChild(nameSpan);
+    card.appendChild(nameRow);
 
-  function updateHeader() {
-    if (!selectedAgent) return;
-    var agent = agents.get(selectedAgent);
-    if (!agent) return;
-
-    clearChildren(mainHeaderEl);
-    mainHeaderEl.appendChild(createBadge(agent.role || '?', 'badge badge-role role-' + (agent.role || 'boot')));
-
-    var label = document.createElement('span');
-    label.className = 'agent-label';
-    label.textContent = agent.name;
-    mainHeaderEl.appendChild(label);
-
-    mainHeaderEl.appendChild(createBadge(agent.runtime || '?', 'badge-runtime'));
-
+    // Meta row
+    var metaRow = document.createElement('div');
+    metaRow.className = 'agent-meta';
+    metaRow.appendChild(createBadge(agent.runtime || '?', 'badge-runtime'));
     if (agent.attached) {
-      mainHeaderEl.appendChild(createBadge('attached', 'badge badge-attached'));
+      metaRow.appendChild(createBadge('attached', 'badge badge-attached'));
     }
-  }
+    card.appendChild(metaRow);
 
-  // --- Prompt sending ---
-  var pendingSendId = null;  // id of in-flight send-prompt
-
-  function sendPrompt() {
-    var text = promptInput.value.trim();
-    if (!text || !selectedAgent) return;
-    if (pendingSendId) return; // already waiting for a response
-
-    var id = send({ type: 'send-prompt', agent: selectedAgent, prompt: text });
-    if (id) {
-      // Keep text in input until server confirms
-      pendingSendId = id;
-      promptInput.disabled = true;
-      sendBtn.disabled = true;
-    } else {
-      // Queue for retry on reconnect
-      pendingPrompt = { agent: selectedAgent, prompt: text };
-      promptInput.placeholder = 'Queued — will send on reconnect...';
-    }
-  }
-
-  sendBtn.addEventListener('click', sendPrompt);
-  promptInput.addEventListener('keydown', function(e) {
-    if (e.key === 'Enter') sendPrompt();
+    agentListEl.appendChild(card);
   });
+}
 
-  // --- Auto-scroll ---
-  outputEl.addEventListener('scroll', function() {
-    userScrolledUp = (outputEl.scrollHeight - outputEl.scrollTop - outputEl.clientHeight) > 50;
-  });
+// --- Agent selection ---
+function selectAgent(name) {
+  if (selectedAgent === name) return;
 
-  function scrollToBottom() {
-    outputEl.scrollTop = outputEl.scrollHeight;
+  // Unsubscribe from previous
+  if (selectedAgent) {
+    send({ type: 'unsubscribe-output', agent: selectedAgent });
   }
 
-  // --- Boot ---
-  connect();
-})();
+  selectedAgent = name;
+  updateHeader();
+  renderAgentList();
+
+  // Show terminal for this agent
+  showTerminal(name);
+
+  // Subscribe to output
+  send({ type: 'subscribe-output', agent: name });
+}
+
+function deselectAgent() {
+  selectedAgent = null;
+  hideAllTerminals();
+
+  clearChildren(mainHeaderEl);
+  mainHeaderEl.textContent = 'Select an agent to view output';
+
+  renderAgentList();
+}
+
+function updateHeader() {
+  if (!selectedAgent) return;
+  var agent = agents.get(selectedAgent);
+  if (!agent) return;
+
+  clearChildren(mainHeaderEl);
+  mainHeaderEl.appendChild(createBadge(agent.role || '?', 'badge badge-role role-' + (agent.role || 'boot')));
+
+  var label = document.createElement('span');
+  label.className = 'agent-label';
+  label.textContent = agent.name;
+  mainHeaderEl.appendChild(label);
+
+  mainHeaderEl.appendChild(createBadge(agent.runtime || '?', 'badge-runtime'));
+
+  if (agent.attached) {
+    mainHeaderEl.appendChild(createBadge('attached', 'badge badge-attached'));
+  }
+}
+
+// --- Boot ---
+connect();
 </script>
 </body>
 </html>

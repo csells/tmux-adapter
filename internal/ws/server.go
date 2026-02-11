@@ -69,7 +69,7 @@ func (s *Server) BroadcastToAgentSubscribers(msg []byte) {
 		client.mu.Unlock()
 
 		if subscribed {
-			client.Send(msg)
+			client.SendText(msg)
 		}
 	}
 }

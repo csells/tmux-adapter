@@ -132,6 +132,12 @@ func (cm *ControlMode) PipePaneStop(session string) error {
 	return err
 }
 
+// ResizePaneTo sets the pane to an exact size.
+func (cm *ControlMode) ResizePaneTo(target string, cols, rows int) error {
+	_, err := cm.Execute(fmt.Sprintf("resize-pane -t '%s' -x %d -y %d", target, cols, rows))
+	return err
+}
+
 // KillSession destroys a tmux session.
 func (cm *ControlMode) KillSession(session string) error {
 	_, err := cm.Execute(fmt.Sprintf("kill-session -t '%s'", session))
