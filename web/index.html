@@ -153,19 +153,46 @@
     width: 100%;
     height: 100%;
     overflow-y: auto;
-    padding: 16px;
+    padding: 0;
     font-size: 13px;
     line-height: 1.5;
-    white-space: pre-wrap;
-    word-wrap: break-word;
     color: #c9d1d9;
     scrollbar-width: thin;
     scrollbar-color: #30363d #0d1117;
+    display: flex;
+    flex-direction: column;
   }
 
   .output::-webkit-scrollbar { width: 8px; }
   .output::-webkit-scrollbar-track { background: #0d1117; }
   .output::-webkit-scrollbar-thumb { background: #30363d; border-radius: 4px; }
+
+  .scrollback {
+    padding: 8px 16px 0 16px;
+    flex-shrink: 0;
+  }
+
+  .scrollback .screen-row {
+    height: 1.5em;
+    white-space: pre;
+    overflow: hidden;
+  }
+
+  .screen-grid {
+    padding: 4px 16px;
+    flex-shrink: 0;
+  }
+
+  .screen-grid .screen-row {
+    height: 1.5em;
+    white-space: pre;
+    overflow: hidden;
+  }
+
+  .screen-grid .screen-cursor {
+    background: #c9d1d9;
+    color: #0d1117;
+  }
 
   .placeholder {
     display: flex;
@@ -258,6 +285,9 @@
   var msgId = 0;                // monotonic message id
   var ws = null;
   var userScrolledUp = false;
+  var screenRows = new Map();   // row index -> raw text with ANSI codes
+  var screenMeta = { cols: 80, numRows: 24, cursor: [0, 0] };
+  var pendingPrompt = null;     // queued prompt for retry on reconnect
 
   // --- DOM refs ---
   var agentListEl  = document.getElementById('agent-list');
@@ -267,6 +297,204 @@
   var sendBtn      = document.getElementById('send-btn');
   var statusDot    = document.getElementById('status-dot');
   var statusText   = document.getElementById('status-text');
+
+  // Scrollback and screen-grid containers (created on demand)
+  var scrollbackEl = null;
+  var screenGridEl = null;
+
+  // --- ANSI SGR color tables ---
+  var STANDARD_COLORS = ['#282c34','#e06c75','#98c379','#e5c07b','#61afef','#c678dd','#56b6c2','#abb2bf'];
+  var BRIGHT_COLORS   = ['#5c6370','#be5046','#7ec168','#d19a66','#528bff','#b668cd','#3fc5d4','#ffffff'];
+
+  function color256(n) {
+    if (n < 8) return STANDARD_COLORS[n];
+    if (n < 16) return BRIGHT_COLORS[n - 8];
+    if (n < 232) {
+      var idx = n - 16;
+      var b = idx % 6; idx = (idx - b) / 6;
+      var g = idx % 6; idx = (idx - g) / 6;
+      var r = idx;
+      var toHex = function(v) { var h = (v === 0 ? 0 : 55 + v * 40).toString(16); return h.length < 2 ? '0' + h : h; };
+      return '#' + toHex(r) + toHex(g) + toHex(b);
+    }
+    var level = 8 + (n - 232) * 10;
+    var hex = level.toString(16);
+    if (hex.length < 2) hex = '0' + hex;
+    return '#' + hex + hex + hex;
+  }
+
+  // --- ANSI SGR parser ---
+  function parseAnsiRow(text) {
+    var spans = [];
+    var state = { bold: false, italic: false, underline: false, fg: null, bg: null };
+    var re = /\x1b\[([\d;]*)m/g;
+    var lastIndex = 0;
+    var match;
+
+    function makeSpan(str) {
+      var span = document.createElement('span');
+      span.textContent = str;
+      var styles = '';
+      if (state.bold) styles += 'font-weight:bold;';
+      if (state.italic) styles += 'font-style:italic;';
+      if (state.underline) styles += 'text-decoration:underline;';
+      if (state.fg) styles += 'color:' + state.fg + ';';
+      if (state.bg) styles += 'background:' + state.bg + ';';
+      if (styles) span.setAttribute('style', styles);
+      return span;
+    }
+
+    while ((match = re.exec(text)) !== null) {
+      if (match.index > lastIndex) {
+        spans.push(makeSpan(text.substring(lastIndex, match.index)));
+      }
+      lastIndex = re.lastIndex;
+
+      var params = match[1] === '' ? [0] : match[1].split(';').map(Number);
+      for (var i = 0; i < params.length; i++) {
+        var p = params[i];
+        if (p === 0) {
+          state.bold = false; state.italic = false; state.underline = false;
+          state.fg = null; state.bg = null;
+        } else if (p === 1) {
+          state.bold = true;
+        } else if (p === 3) {
+          state.italic = true;
+        } else if (p === 4) {
+          state.underline = true;
+        } else if (p === 22) {
+          state.bold = false;
+        } else if (p === 23) {
+          state.italic = false;
+        } else if (p === 24) {
+          state.underline = false;
+        } else if (p >= 30 && p <= 37) {
+          state.fg = STANDARD_COLORS[p - 30];
+        } else if (p === 38) {
+          if (params[i + 1] === 5 && i + 2 < params.length) {
+            state.fg = color256(params[i + 2]);
+            i += 2;
+          } else if (params[i + 1] === 2 && i + 4 < params.length) {
+            state.fg = 'rgb(' + params[i + 2] + ',' + params[i + 3] + ',' + params[i + 4] + ')';
+            i += 4;
+          }
+        } else if (p === 39) {
+          state.fg = null;
+        } else if (p >= 40 && p <= 47) {
+          state.bg = STANDARD_COLORS[p - 40];
+        } else if (p === 48) {
+          if (params[i + 1] === 5 && i + 2 < params.length) {
+            state.bg = color256(params[i + 2]);
+            i += 2;
+          } else if (params[i + 1] === 2 && i + 4 < params.length) {
+            state.bg = 'rgb(' + params[i + 2] + ',' + params[i + 3] + ',' + params[i + 4] + ')';
+            i += 4;
+          }
+        } else if (p === 49) {
+          state.bg = null;
+        } else if (p >= 90 && p <= 97) {
+          state.fg = BRIGHT_COLORS[p - 90];
+        }
+      }
+    }
+
+    if (lastIndex < text.length) {
+      spans.push(makeSpan(text.substring(lastIndex)));
+    }
+
+    if (spans.length === 0) {
+      spans.push(document.createElement('span'));
+    }
+
+    return spans;
+  }
+
+  // --- Screen rendering ---
+  function ensureScreenLayout() {
+    if (scrollbackEl && screenGridEl) return;
+
+    clearChildren(outputEl);
+    scrollbackEl = document.createElement('div');
+    scrollbackEl.className = 'scrollback';
+    outputEl.appendChild(scrollbackEl);
+
+    screenGridEl = document.createElement('div');
+    screenGridEl.className = 'screen-grid';
+    outputEl.appendChild(screenGridEl);
+
+    for (var i = 0; i < screenMeta.numRows; i++) {
+      var row = document.createElement('div');
+      row.className = 'screen-row';
+      row.appendChild(document.createElement('span'));
+      screenGridEl.appendChild(row);
+    }
+  }
+
+  function renderScreenRow(rowIndex) {
+    if (!screenGridEl) return;
+    if (rowIndex < 0 || rowIndex >= screenMeta.numRows) return;
+    var rowDiv = screenGridEl.children[rowIndex];
+    if (!rowDiv) return;
+    clearChildren(rowDiv);
+    var text = screenRows.get(rowIndex) || '';
+    var spans = parseAnsiRow(text);
+    spans.forEach(function(span) { rowDiv.appendChild(span); });
+  }
+
+  function renderFullScreen(screenData) {
+    if (!screenData) return;
+    screenMeta.cols = screenData.cols || 80;
+    screenMeta.numRows = screenData.numRows || 24;
+    screenMeta.cursor = screenData.cursor || [0, 0];
+
+    if (screenGridEl && screenGridEl.children.length !== screenMeta.numRows) {
+      clearChildren(screenGridEl);
+      for (var i = 0; i < screenMeta.numRows; i++) {
+        var row = document.createElement('div');
+        row.className = 'screen-row';
+        row.appendChild(document.createElement('span'));
+        screenGridEl.appendChild(row);
+      }
+    }
+
+    screenRows.clear();
+    if (screenData.rows) {
+      var keys = Object.keys(screenData.rows);
+      for (var k = 0; k < keys.length; k++) {
+        screenRows.set(Number(keys[k]), screenData.rows[keys[k]]);
+      }
+    }
+
+    for (var r = 0; r < screenMeta.numRows; r++) {
+      renderScreenRow(r);
+    }
+  }
+
+  function applyScreenUpdate(msg) {
+    if (msg.cursor) screenMeta.cursor = msg.cursor;
+    if (msg.rows) {
+      var keys = Object.keys(msg.rows);
+      for (var k = 0; k < keys.length; k++) {
+        var idx = Number(keys[k]);
+        screenRows.set(idx, msg.rows[keys[k]]);
+        renderScreenRow(idx);
+      }
+    }
+  }
+
+  // --- History rendering ---
+  function renderHistory(text) {
+    if (!scrollbackEl) return;
+    clearChildren(scrollbackEl);
+    var lines = text.split('\n');
+    for (var i = 0; i < lines.length; i++) {
+      var lineDiv = document.createElement('div');
+      lineDiv.className = 'screen-row';
+      var spans = parseAnsiRow(lines[i]);
+      spans.forEach(function(span) { lineDiv.appendChild(span); });
+      scrollbackEl.appendChild(lineDiv);
+    }
+  }
 
   // --- Helpers: safe DOM construction ---
   function createBadge(text, classNames) {
@@ -289,11 +517,42 @@
       statusDot.classList.remove('disconnected');
       statusText.textContent = 'Connected';
       send({ type: 'subscribe-agents' });
+
+      // Re-subscribe to selected agent's output
+      if (selectedAgent) {
+        clearChildren(outputEl);
+        scrollbackEl = null;
+        screenGridEl = null;
+        screenRows.clear();
+        send({ type: 'subscribe-output', agent: selectedAgent });
+      }
+
+      // Flush pending prompt
+      if (pendingPrompt) {
+        var p = pendingPrompt;
+        pendingPrompt = null;
+        promptInput.placeholder = 'Send a prompt...';
+        send({ type: 'send-prompt', agent: p.agent, prompt: p.prompt });
+      }
     };
 
     ws.onclose = function() {
       statusDot.classList.add('disconnected');
       statusText.textContent = 'Disconnected';
+
+      // If a send-prompt was in flight, re-queue it
+      if (pendingSendId) {
+        pendingSendId = null;
+        var text = promptInput.value.trim();
+        if (text && selectedAgent) {
+          pendingPrompt = { agent: selectedAgent, prompt: text };
+          promptInput.value = '';
+          promptInput.placeholder = 'Queued — will send on reconnect...';
+        }
+        promptInput.disabled = false;
+        sendBtn.disabled = false;
+      }
+
       setTimeout(connect, 2000);
     };
 
@@ -304,6 +563,7 @@
   }
 
   function send(obj) {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return null;
     obj.id = String(++msgId);
     ws.send(JSON.stringify(obj));
     return obj.id;
@@ -338,21 +598,45 @@
         break;
 
       case 'subscribe-output':
+        ensureScreenLayout();
         if (msg.history !== undefined) {
-          outputEl.textContent = msg.history;
-          scrollToBottom();
+          renderHistory(msg.history);
+        }
+        if (msg.screen) {
+          renderFullScreen(msg.screen);
+        }
+        scrollToBottom();
+        break;
+
+      case 'screen-update':
+        if (msg.name === selectedAgent) {
+          applyScreenUpdate(msg);
+          if (!userScrolledUp) scrollToBottom();
         }
         break;
 
       case 'output':
+        // Backward compat fallback for raw byte streaming
         if (msg.name === selectedAgent && msg.data) {
-          outputEl.textContent += msg.data;
+          ensureScreenLayout();
+          scrollbackEl.textContent += msg.data;
           if (!userScrolledUp) scrollToBottom();
         }
         break;
 
       case 'send-prompt':
-        // response to our send; nothing to do on success
+        if (msg.id === pendingSendId) {
+          pendingSendId = null;
+          promptInput.disabled = false;
+          sendBtn.disabled = false;
+          if (msg.ok) {
+            promptInput.value = '';
+          } else {
+            // Show error — keep text in input so user can retry
+            promptInput.placeholder = 'Error: ' + (msg.error || 'send failed') + ' — try again';
+          }
+          promptInput.focus();
+        }
         break;
     }
   }
@@ -410,7 +694,10 @@
     }
 
     selectedAgent = name;
-    outputEl.textContent = '';
+    clearChildren(outputEl);
+    scrollbackEl = null;
+    screenGridEl = null;
+    screenRows.clear();
     userScrolledUp = false;
     updateHeader();
     renderAgentList();
@@ -425,6 +712,9 @@
 
   function deselectAgent() {
     selectedAgent = null;
+    scrollbackEl = null;
+    screenGridEl = null;
+    screenRows.clear();
     clearChildren(outputEl);
     var ph = document.createElement('div');
     ph.className = 'placeholder';
@@ -460,11 +750,24 @@
   }
 
   // --- Prompt sending ---
+  var pendingSendId = null;  // id of in-flight send-prompt
+
   function sendPrompt() {
     var text = promptInput.value.trim();
     if (!text || !selectedAgent) return;
-    send({ type: 'send-prompt', agent: selectedAgent, prompt: text });
-    promptInput.value = '';
+    if (pendingSendId) return; // already waiting for a response
+
+    var id = send({ type: 'send-prompt', agent: selectedAgent, prompt: text });
+    if (id) {
+      // Keep text in input until server confirms
+      pendingSendId = id;
+      promptInput.disabled = true;
+      sendBtn.disabled = true;
+    } else {
+      // Queue for retry on reconnect
+      pendingPrompt = { agent: selectedAgent, prompt: text };
+      promptInput.placeholder = 'Queued — will send on reconnect...';
+    }
   }
 
   sendBtn.addEventListener('click', sendPrompt);

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/tmux-adapter/internal/agents"
+	"github.com/gastownhall/tmux-adapter/internal/vt"
 )
 
 // Request is a message from a WebSocket client.
@@ -19,15 +20,18 @@ type Request struct {
 
 // Response is a message sent to a WebSocket client.
 type Response struct {
-	ID      string         `json:"id,omitempty"`
-	Type    string         `json:"type"`
-	OK      *bool          `json:"ok,omitempty"`
-	Error   string         `json:"error,omitempty"`
-	Agents  []agents.Agent `json:"agents,omitempty"`
-	History string         `json:"history,omitempty"`
-	Agent   *agents.Agent  `json:"agent,omitempty"`
-	Name    string         `json:"name,omitempty"`
-	Data    string         `json:"data,omitempty"`
+	ID      string             `json:"id,omitempty"`
+	Type    string             `json:"type"`
+	OK      *bool              `json:"ok,omitempty"`
+	Error   string             `json:"error,omitempty"`
+	Agents  []agents.Agent     `json:"agents,omitempty"`
+	History string             `json:"history,omitempty"`
+	Screen  *vt.ScreenSnapshot `json:"screen,omitempty"`
+	Agent   *agents.Agent      `json:"agent,omitempty"`
+	Name    string             `json:"name,omitempty"`
+	Data    string             `json:"data,omitempty"`
+	Rows    map[int]string     `json:"rows,omitempty"`
+	Cursor  *[2]int            `json:"cursor,omitempty"`
 }
 
 // Per-agent mutexes for send-prompt serialization.
@@ -171,26 +175,32 @@ func handleSubscribeOutput(c *Client, req Request) {
 	// Check if streaming is requested (default: true)
 	wantStream := req.Stream == nil || *req.Stream
 
+	var screen *vt.ScreenSnapshot
+
 	if wantStream {
-		// Subscribe to pipe-pane output
-		ch, err := c.server.pipeMgr.Subscribe(req.Agent)
+		// Subscribe to pipe-pane output (now returns screen updates + initial snapshot)
+		ch, snap, err := c.server.pipeMgr.Subscribe(req.Agent)
 		if err != nil {
 			okVal := false
 			c.sendJSON(Response{ID: req.ID, Type: "subscribe-output", OK: &okVal, Error: err.Error()})
 			return
 		}
 
+		screen = snap
+
 		c.mu.Lock()
 		c.outputSubs[req.Agent] = ch
 		c.mu.Unlock()
 
-		// Stream output events in background
+		// Stream screen updates in background
 		go func() {
-			for data := range ch {
+			for update := range ch {
+				cursor := [2]int{update.CursorRow, update.CursorCol}
 				event, _ := json.Marshal(Response{
-					Type:  "output",
-					Name:  req.Agent,
-					Data:  string(data),
+					Type:   "screen-update",
+					Name:   req.Agent,
+					Rows:   update.Rows,
+					Cursor: &cursor,
 				})
 				c.Send(event)
 			}
@@ -203,6 +213,7 @@ func handleSubscribeOutput(c *Client, req Request) {
 		Type:    "subscribe-output",
 		OK:      &okVal,
 		History: history,
+		Screen:  screen,
 	})
 }
 

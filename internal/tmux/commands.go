@@ -100,9 +100,9 @@ func (cm *ControlMode) SendKeysRaw(target string, keys ...string) error {
 	return err
 }
 
-// CapturePaneAll captures the entire scrollback history of a session.
+// CapturePaneAll captures the entire scrollback history of a session with ANSI escape codes.
 func (cm *ControlMode) CapturePaneAll(session string) (string, error) {
-	return cm.Execute(fmt.Sprintf("capture-pane -p -t '%s' -S -", session))
+	return cm.Execute(fmt.Sprintf("capture-pane -p -e -t '%s' -S -", session))
 }
 
 // ResizePane adjusts the pane height by delta (e.g., "-1" or "+1").

@@ -7,6 +7,8 @@ import (
 	"sync"
 
 	"nhooyr.io/websocket"
+
+	"github.com/gastownhall/tmux-adapter/internal/vt"
 )
 
 // Client represents a single WebSocket connection.
@@ -14,8 +16,8 @@ type Client struct {
 	conn       *websocket.Conn
 	server     *Server
 	send       chan []byte
-	agentSub   bool                   // subscribed to agent lifecycle
-	outputSubs map[string]<-chan []byte // agent name -> pipe-pane channel
+	agentSub   bool                                // subscribed to agent lifecycle
+	outputSubs map[string]<-chan *vt.ScreenUpdate   // agent name -> screen update channel
 	mu         sync.Mutex
 	ctx        context.Context
 	cancel     context.CancelFunc
@@ -27,7 +29,7 @@ func NewClient(conn *websocket.Conn, server *Server, ctx context.Context, cancel
 		conn:       conn,
 		server:     server,
 		send:       make(chan []byte, 256),
-		outputSubs: make(map[string]<-chan []byte),
+		outputSubs: make(map[string]<-chan *vt.ScreenUpdate),
 		ctx:        ctx,
 		cancel:     cancel,
 	}
