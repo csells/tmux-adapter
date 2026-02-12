@@ -53,7 +53,7 @@ msgType(1 byte) + agentName(utf8) + 0x00 + payload(bytes)
 Notes:
 - Keyboard `0x02` payload is interpreted as VT bytes. Known special-key sequences (e.g. `ESC [ Z`) are translated to tmux key names (`BTab`, arrows, Home/End, PgUp/PgDn, F1-F12). Unknown sequences fall back to byte-exact `send-keys -H`.
 - In the dashboard client, Shift+Tab is explicitly captured and sent as `ESC [ Z` to avoid browser focus traversal.
-- File upload `0x04` payloads are capped at 8MB each, saved server-side, then pasted into tmux via tmux buffer operations. Text-like files up to 256KB paste inline; larger/binary files paste as their saved server-side path.
+- File upload `0x04` payloads are capped at 8MB each, saved server-side, then pasted into tmux via tmux buffer operations. Text-like files up to 256KB paste inline; larger/binary files paste a server-side path (workdir-relative when possible, absolute fallback).
 
 ---
 

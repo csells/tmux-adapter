@@ -64,7 +64,7 @@ Behavior:
 - Max upload size is 8MB per file.
 - File bytes are transferred to the server and saved under `<agent workDir>/.tmux-adapter/uploads` (fallback: `/tmp/tmux-adapter/uploads/...`).
 - If the file is text-like and <= 256KB, the file contents are pasted into tmux.
-- Otherwise, the saved server-side file path is pasted into tmux.
+- Otherwise, a server-side file path is pasted into tmux (relative to the agent workdir when possible, absolute fallback otherwise).
 - The adapter also attempts to mirror the same pasted payload into the server's local clipboard (`pbcopy`, `wl-copy`, `xclip`, `xsel`; best effort).
 
 ### Subscribe to Agent Output

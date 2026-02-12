@@ -47,7 +47,7 @@ messages (agent lifecycle, subscribe/unsubscribe).
 - File drag/drop or clipboard-file paste into the active terminal
 - Max file size: 8MB per upload
 - Server stores the file, copies paste payload to local clipboard (best effort), then pastes into tmux
-- Text-like files <= 256KB paste inline; larger/binary files paste the saved file path
+- Text-like files <= 256KB paste inline; larger/binary files paste a server-valid saved file path (workdir-relative when possible)
 
 **subscribe-output response (JSON):**
 ```json
@@ -101,7 +101,7 @@ Implemented via binary `0x04` upload frames from the browser terminal:
   (fallback under `/tmp/tmux-adapter/uploads`).
 - Payload pasted into tmux:
   - text-like files (<=256KB): file contents
-  - otherwise: absolute path of saved file
+  - otherwise: server-side saved file path (workdir-relative when possible)
 
 ## @file Mentions
 

@@ -35,21 +35,17 @@
     border-bottom: 1px solid #30363d;
     font-size: 14px;
     font-weight: 600;
-    color: #58a6ff;
+    color: #e6edf3;
     display: flex;
     align-items: center;
     gap: 8px;
   }
 
-  .sidebar-header .dot {
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    background: #3fb950;
-    flex-shrink: 0;
+  .sidebar-title {
+    font-size: 13px;
+    color: #8b949e;
+    letter-spacing: 0.4px;
   }
-
-  .sidebar-header .dot.disconnected { background: #f85149; }
 
   .agent-list {
     flex: 1;
@@ -76,6 +72,8 @@
     display: flex;
     align-items: center;
     gap: 6px;
+    flex-wrap: wrap;
+    overflow-wrap: anywhere;
   }
 
   .agent-meta {
@@ -136,12 +134,49 @@
     align-items: center;
     gap: 8px;
     min-height: 44px;
+    flex-wrap: nowrap;
+  }
+
+  .header-content {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
   }
 
   .main-header .agent-label {
     color: #e6edf3;
     font-weight: 600;
+    overflow-wrap: anywhere;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
+
+  .connection-status {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: #58a6ff;
+    font-size: 12px;
+    font-weight: 600;
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+
+  .connection-status .dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #3fb950;
+    flex-shrink: 0;
+  }
+
+  .connection-status .dot.disconnected { background: #f85149; }
 
   .output-wrap {
     flex: 1;
@@ -191,14 +226,160 @@
     font-size: 12px;
     text-align: center;
   }
+
+  .mobile-nav-btn,
+  .sidebar-close {
+    display: none;
+    border: 1px solid #30363d;
+    background: #0d1117;
+    color: #c9d1d9;
+    border-radius: 6px;
+    font-size: 18px;
+    font-weight: 700;
+    line-height: 1;
+    width: 32px;
+    height: 30px;
+    padding: 0;
+    cursor: pointer;
+  }
+
+  .sidebar-close {
+    margin-left: auto;
+    font-size: 20px;
+  }
+
+  .drawer-backdrop {
+    display: none;
+  }
+
+  @media (max-width: 900px) {
+    .container {
+      grid-template-columns: 1fr;
+      height: 100vh;
+      min-height: 100vh;
+    }
+
+    .sidebar {
+      position: fixed;
+      top: 0;
+      left: 0;
+      bottom: 0;
+      width: min(86vw, 340px);
+      border-right: 1px solid #30363d;
+      border-bottom: 0;
+      transform: translateX(-100%);
+      transition: transform 0.2s ease;
+      z-index: 50;
+      box-shadow: 12px 0 28px rgba(0, 0, 0, 0.4);
+      min-height: 100vh;
+    }
+
+    body.drawer-open .sidebar {
+      transform: translateX(0);
+    }
+
+    .drawer-backdrop {
+      display: block;
+      position: fixed;
+      inset: 0;
+      background: rgba(1, 4, 9, 0.62);
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.2s ease;
+      z-index: 40;
+    }
+
+    body.drawer-open .drawer-backdrop {
+      opacity: 1;
+      pointer-events: auto;
+    }
+
+    .main {
+      min-width: 0;
+    }
+
+    .sidebar-header {
+      padding: 12px;
+      font-size: 13px;
+      position: sticky;
+      top: 0;
+      background: #161b22;
+      z-index: 1;
+    }
+
+    .agent-list {
+      display: block;
+      overflow-y: auto;
+      overflow-x: hidden;
+      padding: 10px;
+    }
+
+    .empty-sidebar {
+      min-width: 0;
+    }
+
+    .agent-card {
+      min-width: 0;
+      max-width: none;
+      margin-bottom: 6px;
+    }
+
+    .main-header {
+      padding: 10px 12px;
+      font-size: 12px;
+      min-height: 40px;
+      gap: 6px;
+    }
+
+    .mobile-nav-btn,
+    .sidebar-close {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .header-content {
+      gap: 6px;
+    }
+
+    .connection-status {
+      font-size: 11px;
+      gap: 5px;
+    }
+
+    .placeholder {
+      padding: 16px;
+      text-align: center;
+      font-size: 13px;
+    }
+
+    .terminal-wrapper.drag-over::after {
+      inset: 10px;
+      font-size: 12px;
+    }
+  }
+
+  @media (max-width: 520px) {
+    .agent-card { padding: 9px 10px; }
+
+    .agent-meta {
+      font-size: 10px;
+      gap: 6px;
+    }
+
+    .badge {
+      font-size: 9px;
+      padding: 1px 5px;
+    }
+  }
 </style>
 </head>
 <body>
 <div class="container">
   <div class="sidebar">
     <div class="sidebar-header">
-      <span class="dot disconnected" id="status-dot"></span>
-      <span id="status-text">Connecting...</span>
+      <span class="sidebar-title">Agents</span>
+      <button type="button" class="sidebar-close" id="sidebar-close" aria-label="Close agents drawer">×</button>
     </div>
     <div class="agent-list" id="agent-list">
       <div class="empty-sidebar">No agents running</div>
@@ -207,13 +388,19 @@
 
   <div class="main">
     <div class="main-header" id="main-header">
-      Select an agent to view output
+      <button type="button" class="mobile-nav-btn" id="mobile-nav-btn" aria-label="Open agents drawer">☰</button>
+      <div class="header-content" id="header-content">Select an agent to view output</div>
+      <div class="connection-status" id="connection-status">
+        <span class="dot disconnected" id="status-dot"></span>
+        <span id="status-text">Connecting...</span>
+      </div>
     </div>
     <div class="output-wrap" id="output-wrap">
       <div class="placeholder" id="placeholder">Select an agent from the sidebar</div>
     </div>
   </div>
 </div>
+<div class="drawer-backdrop" id="drawer-backdrop"></div>
 
 <script type="module">
 import { init, Terminal } from 'https://cdn.jsdelivr.net/npm/ghostty-web/+esm';
@@ -238,10 +425,13 @@ var MaxUploadBytes = 8 * 1024 * 1024;
 // --- DOM refs ---
 var agentListEl  = document.getElementById('agent-list');
 var outputWrapEl = document.getElementById('output-wrap');
-var mainHeaderEl = document.getElementById('main-header');
+var headerContentEl = document.getElementById('header-content');
 var placeholderEl = document.getElementById('placeholder');
 var statusDot    = document.getElementById('status-dot');
 var statusText   = document.getElementById('status-text');
+var mobileNavBtn = document.getElementById('mobile-nav-btn');
+var sidebarCloseBtn = document.getElementById('sidebar-close');
+var drawerBackdropEl = document.getElementById('drawer-backdrop');
 
 // --- Helpers: safe DOM construction ---
 function createBadge(text, classNames) {
@@ -253,6 +443,61 @@ function createBadge(text, classNames) {
 
 function clearChildren(el) {
   while (el.firstChild) el.removeChild(el.firstChild);
+}
+
+function isMobileLayout() {
+  return window.matchMedia('(max-width: 900px)').matches;
+}
+
+function openDrawer() {
+  if (!isMobileLayout()) return;
+  document.body.classList.add('drawer-open');
+}
+
+function closeDrawer() {
+  document.body.classList.remove('drawer-open');
+}
+
+function syncMobileNavButton() {
+  if (!mobileNavBtn) return;
+  mobileNavBtn.textContent = '☰';
+  mobileNavBtn.setAttribute('aria-label', 'Open agents drawer');
+}
+
+function bindMobileLayoutEvents() {
+  if (mobileNavBtn) {
+    mobileNavBtn.addEventListener('click', function() {
+      if (!isMobileLayout()) return;
+      openDrawer();
+    });
+  }
+
+  if (sidebarCloseBtn) {
+    sidebarCloseBtn.addEventListener('click', function() {
+      closeDrawer();
+    });
+  }
+
+  if (drawerBackdropEl) {
+    drawerBackdropEl.addEventListener('click', function() {
+      closeDrawer();
+    });
+  }
+
+  var media = window.matchMedia('(max-width: 900px)');
+  var onChange = function(ev) {
+    if (!ev.matches) {
+      closeDrawer();
+    } else if (!selectedAgent) {
+      openDrawer();
+    }
+    syncMobileNavButton();
+  };
+  if (typeof media.addEventListener === 'function') {
+    media.addEventListener('change', onChange);
+  } else if (typeof media.addListener === 'function') {
+    media.addListener(onChange);
+  }
 }
 
 // --- Terminal fit ---
@@ -670,7 +915,13 @@ function renderAgentList() {
 
 // --- Agent selection ---
 function selectAgent(name) {
-  if (selectedAgent === name) return;
+  if (selectedAgent === name) {
+    if (isMobileLayout()) {
+      closeDrawer();
+    }
+    syncMobileNavButton();
+    return;
+  }
 
   // Unsubscribe from previous
   if (selectedAgent) {
@@ -688,16 +939,25 @@ function selectAgent(name) {
   // Activate streaming; subscribe-output ack will trigger a redraw/resize once
   // pipe-pane is confirmed active on the server.
   send({ type: 'subscribe-output', agent: name });
+
+  if (isMobileLayout()) {
+    closeDrawer();
+  }
+  syncMobileNavButton();
 }
 
 function deselectAgent() {
   selectedAgent = null;
   hideAllTerminals();
 
-  clearChildren(mainHeaderEl);
-  mainHeaderEl.textContent = 'Select an agent to view output';
+  clearChildren(headerContentEl);
+  headerContentEl.textContent = 'Select an agent to view output';
 
   renderAgentList();
+  if (isMobileLayout()) {
+    openDrawer();
+  }
+  syncMobileNavButton();
 }
 
 function updateHeader() {
@@ -705,23 +965,30 @@ function updateHeader() {
   var agent = agents.get(selectedAgent);
   if (!agent) return;
 
-  clearChildren(mainHeaderEl);
-  mainHeaderEl.appendChild(createBadge(agent.role || '?', 'badge badge-role role-' + (agent.role || 'boot')));
+  clearChildren(headerContentEl);
+  headerContentEl.appendChild(createBadge(agent.role || '?', 'badge badge-role role-' + (agent.role || 'boot')));
 
   var label = document.createElement('span');
   label.className = 'agent-label';
   label.textContent = agent.name;
-  mainHeaderEl.appendChild(label);
+  headerContentEl.appendChild(label);
 
-  mainHeaderEl.appendChild(createBadge(agent.runtime || '?', 'badge-runtime'));
+  headerContentEl.appendChild(createBadge(agent.runtime || '?', 'badge-runtime'));
 
   if (agent.attached) {
-    mainHeaderEl.appendChild(createBadge('attached', 'badge badge-attached'));
+    headerContentEl.appendChild(createBadge('attached', 'badge badge-attached'));
   }
+
+  syncMobileNavButton();
 }
 
 // --- Boot ---
+bindMobileLayoutEvents();
 connect();
+syncMobileNavButton();
+if (isMobileLayout() && !selectedAgent) {
+  openDrawer();
+}
 </script>
 </body>
 </html>

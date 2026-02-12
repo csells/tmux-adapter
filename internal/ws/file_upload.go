@@ -39,7 +39,12 @@ func handleBinaryFileUpload(c *Client, agentName string, payload []byte) error {
 		return fmt.Errorf("save uploaded file: %w", err)
 	}
 
-	pastePayload := buildPastePayload(savedPath, mimeType, fileBytes)
+	pasteBaseDir := agent.WorkDir
+	if paneInfo, err := c.server.ctrl.GetPaneInfo(agentName); err == nil && strings.TrimSpace(paneInfo.WorkDir) != "" {
+		pasteBaseDir = paneInfo.WorkDir
+	}
+	pastePath := buildServerPastePath(pasteBaseDir, savedPath)
+	pastePayload := buildPastePayload(pastePath, mimeType, fileBytes)
 
 	if err := copyToLocalClipboard(pastePayload); err != nil {
 		log.Printf("clipboard copy %s: %v", agentName, err)
@@ -48,7 +53,7 @@ func handleBinaryFileUpload(c *Client, agentName string, payload []byte) error {
 		return fmt.Errorf("paste into tmux: %w", err)
 	}
 
-	log.Printf("file upload %s: name=%q mime=%q bytes=%d saved=%s pastedBytes=%d", agentName, fileName, mimeType, len(fileBytes), savedPath, len(pastePayload))
+	log.Printf("file upload %s: name=%q mime=%q bytes=%d saved=%s pastePath=%s pastedBytes=%d", agentName, fileName, mimeType, len(fileBytes), savedPath, pastePath, len(pastePayload))
 	return nil
 }
 
@@ -73,11 +78,35 @@ func parseFileUploadPayload(payload []byte) (fileName string, mimeType string, d
 	return fileName, mimeType, data, nil
 }
 
-func buildPastePayload(savedPath, mimeType string, fileBytes []byte) []byte {
+func buildPastePayload(pastePath, mimeType string, fileBytes []byte) []byte {
 	if len(fileBytes) <= maxInlinePasteBytes && isTextLike(mimeType, fileBytes) {
 		return fileBytes
 	}
-	return []byte(savedPath)
+	return []byte(pastePath)
+}
+
+// buildServerPastePath returns a path string that is valid on the server-side
+// agent machine. If the uploaded file is under the agent workdir, prefer a
+// relative path so the pasted reference remains portable across hosts.
+func buildServerPastePath(workDir, savedPath string) string {
+	wd := strings.TrimSpace(workDir)
+	if wd == "" {
+		return savedPath
+	}
+
+	rel, err := filepath.Rel(wd, savedPath)
+	if err != nil || rel == "" {
+		return savedPath
+	}
+
+	rel = filepath.Clean(rel)
+	if rel == "." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || rel == ".." {
+		return savedPath
+	}
+	if !strings.HasPrefix(rel, ".") {
+		rel = "." + string(filepath.Separator) + rel
+	}
+	return filepath.ToSlash(rel)
 }
 
 func isTextLike(mimeType string, data []byte) bool {
