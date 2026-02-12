@@ -307,12 +307,22 @@
     }
 
     .sidebar-header {
-      padding: 12px;
+      padding: 10px 12px;
       font-size: 13px;
+      min-height: 40px;
       position: sticky;
       top: 0;
       background: #161b22;
       z-index: 1;
+    }
+
+    .sidebar-close {
+      margin-left: 0;
+      order: -1;
+    }
+
+    .sidebar-title {
+      margin-left: 4px;
     }
 
     .agent-list {
@@ -386,8 +396,8 @@
 <div class="container">
   <div class="sidebar">
     <div class="sidebar-header">
-      <span class="sidebar-title">Agents</span>
       <button type="button" class="sidebar-close" id="sidebar-close" aria-label="Close agents drawer">×</button>
+      <span class="sidebar-title">Agents</span>
     </div>
     <div class="agent-list" id="agent-list">
       <div class="empty-sidebar">No agents running</div>
