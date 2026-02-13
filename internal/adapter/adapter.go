@@ -27,15 +27,17 @@ type Adapter struct {
 	port           int
 	authToken      string
 	originPatterns []string
+	debugServeDir  string
 }
 
 // New creates a new Adapter.
-func New(gtDir string, port int, authToken string, originPatterns []string) *Adapter {
+func New(gtDir string, port int, authToken string, originPatterns []string, debugServeDir string) *Adapter {
 	return &Adapter{
 		gtDir:          gtDir,
 		port:           port,
 		authToken:      authToken,
 		originPatterns: originPatterns,
+		debugServeDir:  debugServeDir,
 	}
 }
 
@@ -79,6 +81,31 @@ func (a *Adapter) Start() error {
 	mux.Handle("/tmux-adapter-web/", corsHandler(
 		http.StripPrefix("/tmux-adapter-web/", http.FileServer(http.FS(componentFS))),
 	))
+
+	// Debug: remote console log endpoint
+	if a.debugServeDir != "" {
+		mux.HandleFunc("/debug/log", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+			if r.Method == "OPTIONS" {
+				w.Header().Set("Access-Control-Allow-Methods", "POST")
+				w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+				w.WriteHeader(204)
+				return
+			}
+			body := make([]byte, 4096)
+			n, _ := r.Body.Read(body)
+			if n > 0 {
+				log.Printf("[UI] %s", string(body[:n]))
+			}
+			w.WriteHeader(204)
+		})
+	}
+
+	// Debug: serve static files from a local directory (development only)
+	if a.debugServeDir != "" {
+		log.Printf("serving static files from %s at /", a.debugServeDir)
+		mux.Handle("/", http.FileServer(http.Dir(a.debugServeDir)))
+	}
 
 	a.httpSrv = &http.Server{
 		Addr:    fmt.Sprintf(":%d", a.port),
@@ -156,6 +183,7 @@ func (a *Adapter) handleReady(w http.ResponseWriter, _ *http.Request) {
 func corsHandler(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Cache-Control", "no-store")
 		next.ServeHTTP(w, r)
 	})
 }

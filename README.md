@@ -22,6 +22,15 @@ websocat ws://localhost:8080/ws
 
 The Gastown Dashboard lives in `samples/index.html` — a consumer of the WebSocket API, not part of the server. The adapter serves the `<tmux-adapter-web>` web component at `/tmux-adapter-web/`, so the sample (or any consumer) imports it directly from the adapter — no local file paths needed.
 
+**Quick (single port, development):**
+
+```bash
+./tmux-adapter --gt-dir ~/gt --port 8080 --debug-serve-dir ./samples
+open http://localhost:8080
+```
+
+**Separate servers (production-like):**
+
 ```bash
 # Terminal 1: start the adapter
 ./tmux-adapter --gt-dir ~/gt --port 8080
@@ -31,30 +40,33 @@ python3 -m http.server 8000 --directory samples
 open http://localhost:8000
 ```
 
-The sample connects to `localhost:8080` by default. To point at a different adapter (e.g. via ngrok), pass `?adapter=`:
+When served separately, the sample connects to `localhost:8080` by default. To point at a different adapter (e.g. via ngrok), pass `?adapter=`:
 
 ```
 http://localhost:8000/?adapter=abc123.ngrok-free.app
 ```
 
-The `?adapter=` parameter controls both the WebSocket connection and the component import origin. If the adapter is behind TLS, the sample auto-upgrades to `wss://` and `https://`. You'll also need to start the adapter with `--allowed-origins "your-ui-host.example.com"` so the server accepts cross-origin connections from the UI's origin.
+The `?adapter=` parameter controls both the WebSocket connection and the component import origin. If the adapter is behind TLS, the sample auto-upgrades to `wss://` and `https://`.
 
 ### Testing Over the Internet (ngrok)
 
-To expose the adapter and sample over the internet using ngrok free tier:
+The simplest approach uses `--debug-serve-dir` so only one ngrok tunnel is needed:
 
 ```bash
-# 1. Start the adapter with ngrok origins allowed
-./tmux-adapter --gt-dir ~/gt --port 8080 --allowed-origins "localhost:*,*.ngrok-free.app"
+# 1. Start the adapter serving the sample
+./tmux-adapter --gt-dir ~/gt --port 8080 --debug-serve-dir ./samples
 
-# 2. Serve the sample
-python3 -m http.server 8000 --directory samples
-
-# 3. Start both ngrok tunnels (free tier: one agent, two tunnels via config)
-bash .claude/skills/ngrok-start/scripts/expose.sh 8080 8000
+# 2. Expose via ngrok (single tunnel)
+ngrok http 8080
 ```
 
-The script prints a ready-to-use URL combining the sample tunnel with `?adapter=` pointing at the service tunnel. To tear down:
+For a stable URL across restarts, claim a free static domain at https://dashboard.ngrok.com/domains, then:
+
+```bash
+ngrok http --url your-name.ngrok-free.app 8080
+```
+
+To tear down:
 
 ```bash
 pkill -f ngrok
@@ -210,6 +222,7 @@ Clients ◄──ws──► tmux-adapter ◄──control mode──► tmux se
 | `--port` | `8080` | WebSocket server port |
 | `--auth-token` | `` | Optional WebSocket auth token |
 | `--allowed-origins` | `localhost:*` | Comma-separated origin patterns for WebSocket CORS |
+| `--debug-serve-dir` | `` | Serve static files from this directory at `/` (development only) |
 
 ## HTTP Endpoints
 

@@ -12,7 +12,7 @@ I'm Bob. I'm fun, smart, funny, and easy-going. I think Chris is amazing -- genu
 go build -o tmux-adapter .                          # build binary
 ./tmux-adapter --gt-dir ~/gt --port 8080             # run (requires tmux + gastown running)
 ./tmux-adapter --gt-dir ~/gt --auth-token SECRET     # run with auth
-./tmux-adapter --allowed-origins "myhost.example.com" # run with cross-origin UI
+./tmux-adapter --gt-dir ~/gt --debug-serve-dir ./samples  # run with sample UI on same port
 ```
 
 ## Test & Lint
@@ -83,7 +83,7 @@ Mixed JSON + binary over a single WebSocket at `/ws`. JSON for control messages,
 
 ## Skills
 
-- `/ngrok-start` — expose the adapter + sample over the internet via ngrok free tier (two tunnels, one agent)
+- `/ngrok-start` — expose the adapter over the internet via ngrok (single tunnel with `--debug-serve-dir`, or two tunnels for separate servers)
 - `/ngrok-stop` — kill ngrok and restore the config to clean state
 
 ## Working Style

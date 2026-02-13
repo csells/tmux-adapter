@@ -1,68 +1,51 @@
 ---
 name: ngrok-start
-description: Expose two local services (e.g., an API server and a sample/UI) over the internet via ngrok free tier using a single agent with multiple tunnels. Use when the user asks to expose local services via ngrok, test over the internet, share a local server publicly, or set up ngrok tunnels. Handles the free tier limitation of one agent session by configuring both tunnels in the ngrok config file.
+description: Expose tmux-adapter over the internet via ngrok. Use when the user asks to expose local services via ngrok, test over the internet, share a local server publicly, or set up ngrok tunnels.
 ---
 
 # ngrok-start
 
-Expose a service + sample (or any two local ports) over the internet via ngrok free tier.
+Expose the adapter (and optionally the sample) over the internet via ngrok.
 
-## Key Constraint: Free Tier
+## Preferred: Single Tunnel with --debug-serve-dir
 
-Free ngrok allows only **one agent session**. To expose two ports, define both tunnels in the ngrok config and start them with `ngrok start --all`.
+Use `--debug-serve-dir` so the adapter serves the sample too — one port, one tunnel:
 
-## Workflow
+```bash
+# 1. Start the adapter with the sample
+./tmux-adapter --gt-dir ~/gt --port 8080 --debug-serve-dir ./samples
 
-### 1. Prerequisites
+# 2. Expose via ngrok
+ngrok http 8080
+```
 
-- ngrok installed (`brew install ngrok`)
-- ngrok authtoken configured (`ngrok config add-authtoken <TOKEN>`)
-- Both local services already running
+For a stable URL across restarts, claim a free static domain at https://dashboard.ngrok.com/domains:
 
-### 2. Run the expose script
+```bash
+ngrok http --url your-name.ngrok-free.app 8080
+```
+
+## Alternative: Two Tunnels (separate servers)
+
+If the adapter and sample must run on separate ports, use the expose script:
 
 ```bash
 bash .claude/skills/ngrok-start/scripts/expose.sh <service-port> <sample-port>
 ```
 
-Example for tmux-adapter:
+The script configures both tunnels in the ngrok config and starts them with `ngrok start --all` (free tier allows only one agent session). It prints a combined URL with `?adapter=` pointing at the service tunnel.
+
+The service needs CORS for the sample's ngrok origin:
 ```bash
-bash .claude/skills/ngrok-start/scripts/expose.sh 8080 8000
-```
-
-The script:
-- Reads the existing authtoken from `~/Library/Application Support/ngrok/ngrok.yml`
-- Kills any existing ngrok processes
-- Writes a config with both tunnels
-- Starts `ngrok start --all`
-- Waits for tunnels to come up
-- Queries the ngrok API at `localhost:4040/api/tunnels` for public URLs
-- Prints the combined URL with `?adapter=` query param
-
-### 3. If the service needs CORS for the sample's origin
-
-Restart the service with the ngrok domain allowed:
-
-```bash
-# Example: tmux-adapter
 ./tmux-adapter --gt-dir ~/gt --port 8080 --allowed-origins "localhost:*,*.ngrok-free.app"
 ```
 
-### 4. Share the URL
+## ngrok interstitial
 
-The script prints a ready-to-use URL like:
-```
-https://abc123.ngrok-free.app/?adapter=def456.ngrok-free.app
-```
-
-The `?adapter=` parameter tells the sample both where to connect the WebSocket and where to import the web component — one param controls everything.
-
-### 5. ngrok interstitial
-
-Free tier shows a "Visit Site" interstitial on first load. Users click through it once per tunnel.
+Free tier shows a "Visit Site" interstitial on first load. Users click through it once.
 
 ## Troubleshooting
 
-- **ERR_NGROK_108** (multiple agents): Kill all ngrok processes and use `ngrok start --all` with a config file instead of multiple `ngrok http` commands.
+- **ERR_NGROK_108** (multiple agents): Kill all ngrok processes (`pkill -f ngrok`) and retry.
 - **Tunnels not appearing**: Query `curl -s http://localhost:4040/api/tunnels` to check status.
-- **WebSocket rejected**: Ensure the service's `--allowed-origins` includes `*.ngrok-free.app`.
+- **WebSocket rejected**: Ensure `--allowed-origins` includes `*.ngrok-free.app`.

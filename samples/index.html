@@ -132,6 +132,7 @@
     background: #161b22;
     display: flex;
     align-items: center;
+    flex-shrink: 0;
     gap: 8px;
     min-height: 44px;
     flex-wrap: nowrap;
@@ -401,6 +402,7 @@
     <div class="main-header" id="main-header">
       <button type="button" class="mobile-nav-btn" id="mobile-nav-btn" aria-label="Open agents drawer">☰</button>
       <div class="header-content" id="header-content">Select an agent to view output</div>
+      <button type="button" id="kb-toggle" style="display:none; background:rgba(22,27,34,0.9); border:1px solid #30363d; border-radius:6px; color:#8b949e; font-size:18px; width:36px; height:36px; cursor:pointer; align-items:center; justify-content:center; -webkit-tap-highlight-color:transparent" aria-label="Toggle keyboard">&#x2328;</button>
       <div class="connection-status" id="connection-status">
         <span class="dot disconnected" id="status-dot"></span>
         <span id="status-text">Connecting...</span>
@@ -417,10 +419,19 @@
 import { init } from 'ghostty-web';
 await init();
 
-var adapterHost = new URLSearchParams(location.search).get('adapter') || 'localhost:8080';
+var adapterHost = new URLSearchParams(location.search).get('adapter') || location.host || 'localhost:8080';
 var adapterOrigin = (location.protocol === 'https:' ? 'https://' : 'http://') + adapterHost;
-var { decodeBinaryFrame, encodeBinaryFrame, BinaryMsgType } = await import(adapterOrigin + '/tmux-adapter-web/index.js');
 
+// Remote debug logging — sends to adapter's /debug/log endpoint
+function rlog() {
+  var msg = Array.prototype.slice.call(arguments).join(' ');
+  console.log('[rlog]', msg);
+  navigator.sendBeacon(adapterOrigin + '/debug/log', msg);
+}
+window.rlog = rlog;
+
+var cacheBust = '?v=' + Date.now();
+var { decodeBinaryFrame, encodeBinaryFrame, BinaryMsgType } = await import(adapterOrigin + '/tmux-adapter-web/index.js' + cacheBust);
 // --- State ---
 var agents = new Map();       // name -> agent object
 var selectedAgent = null;     // name of currently selected agent
@@ -442,11 +453,76 @@ var statusText   = document.getElementById('status-text');
 var mobileNavBtn = document.getElementById('mobile-nav-btn');
 var sidebarCloseBtn = document.getElementById('sidebar-close');
 var drawerBackdropEl = document.getElementById('drawer-backdrop');
+var kbToggleBtn = document.getElementById('kb-toggle');
+var kbActive = false;
+
+// --- Mobile keyboard toggle ---
+var isTouchDevice = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+var kbFocusGuardUntil = 0; // timestamp: suppress blur detection while VKB is opening
+rlog('touch=' + isTouchDevice + ' selectedAgent=' + selectedAgent);
+if (isTouchDevice) {
+  kbToggleBtn.style.display = 'flex';
+  kbToggleBtn.addEventListener('touchend', function(ev) {
+    ev.preventDefault();
+    ev.stopPropagation();
+    kbActive = !kbActive;
+    rlog('kb toggle pressed, kbActive=' + kbActive + ' selectedAgent=' + selectedAgent);
+    var el = selectedAgent ? outputWrapEl.querySelector('tmux-adapter-web[name="' + CSS.escape(selectedAgent) + '"]') : null;
+    if (kbActive && el) {
+      // Set a guard window: suppress blur events for 500ms while the VKB opens and triggers resize
+      kbFocusGuardUntil = Date.now() + 500;
+      rlog('calling focusTextarea with 500ms guard');
+      el.focusTextarea();
+      // Re-assert focus after resize settles
+      setTimeout(function() { if (kbActive && el) { rlog('re-focus after settle'); el.focusTextarea(); } }, 300);
+      kbToggleBtn.style.color = '#58a6ff';
+      kbToggleBtn.style.borderColor = '#58a6ff';
+    } else if (!kbActive && el) {
+      rlog('calling blurTextarea');
+      el.blurTextarea();
+      kbToggleBtn.style.color = '#8b949e';
+      kbToggleBtn.style.borderColor = '#30363d';
+    }
+  });
+
+  // Detect VKB dismiss via blur — but ignore during the guard window
+  outputWrapEl.addEventListener('focusout', function(ev) {
+    if (kbActive && ev.target && ev.target.tagName === 'TEXTAREA') {
+      if (Date.now() < kbFocusGuardUntil) {
+        rlog('textarea blur during guard window, ignoring');
+        return;
+      }
+      rlog('textarea blur detected, resetting kbActive');
+      kbActive = false;
+      kbToggleBtn.style.color = '#8b949e';
+      kbToggleBtn.style.borderColor = '#30363d';
+    }
+  });
+}
 
 // --- Terminal event wiring (delegated on outputWrapEl) ---
 outputWrapEl.addEventListener('terminal-input', function(e) {
+  rlog('terminal-input: ' + e.detail.data.length + ' bytes from ' + e.detail.name);
   sendBinary(BinaryMsgType.KeyboardInput, e.detail.name, e.detail.data);
 });
+
+// --- Debug: trace keystroke flow on touch devices ---
+if (isTouchDevice) {
+  outputWrapEl.addEventListener('keydown', function(e) { rlog('keydown: key=' + e.key + ' target=' + e.target.tagName + '.' + e.target.className); }, true);
+  outputWrapEl.addEventListener('beforeinput', function(e) { rlog('beforeinput: type=' + e.inputType + ' data=' + (e.data || '') + ' target=' + e.target.tagName); }, true);
+  outputWrapEl.addEventListener('input', function(e) { rlog('input: type=' + e.inputType + ' data=' + (e.data || '') + ' target=' + e.target.tagName); }, true);
+  // Check if beforeinput has listeners on the textarea
+  outputWrapEl.addEventListener('terminal-ready', function() {
+    var termEl = outputWrapEl.querySelector('tmux-adapter-web');
+    if (termEl) {
+      var ta = termEl.querySelector('textarea');
+      rlog('textarea found=' + !!ta + ' focused=' + (document.activeElement === ta));
+      if (ta) {
+        ta.addEventListener('beforeinput', function(e) { rlog('TA-beforeinput: type=' + e.inputType + ' data=' + (e.data || '')); });
+      }
+    }
+  }, true);
+}
 
 outputWrapEl.addEventListener('terminal-resize', function(e) {
   sendBinary(BinaryMsgType.Resize, e.detail.name, textEncoder.encode(e.detail.cols + ':' + e.detail.rows));
@@ -826,6 +902,19 @@ function updateHeader() {
   }
 
   syncMobileNavButton();
+}
+
+// --- Virtual keyboard viewport adjustment ---
+if (window.visualViewport) {
+  var containerEl = document.querySelector('.container');
+  window.visualViewport.addEventListener('resize', function() {
+    // When VKB appears, visualViewport.height shrinks. Resize the layout to fit.
+    containerEl.style.height = window.visualViewport.height + 'px';
+  });
+  window.visualViewport.addEventListener('scroll', function() {
+    // Prevent the page from scrolling behind the keyboard
+    window.scrollTo(0, 0);
+  });
 }
 
 // --- Boot ---

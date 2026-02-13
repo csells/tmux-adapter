@@ -11,6 +11,8 @@ var RESIZE_SEND_DEBOUNCE_MS = 90;
 var RESIZE_REVEAL_TIMEOUT_MS = 260;
 var INITIAL_PAINT_TIMEOUT_MS = 3000;
 
+var isTouchDevice = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+
 var COMPONENT_CSS = [
   'tmux-adapter-web { display: block; width: 100%; height: 100%; overflow: hidden; position: relative; }',
   '.tmux-adapter-web-host { width: 100%; height: 100%; transform-origin: top left; will-change: transform; }',
@@ -170,6 +172,47 @@ export class TmuxAdapterWeb extends HTMLElement {
       function() { return self.getAttribute('name') || ''; }
     );
 
+    // Mobile: suppress ghostty-web's auto-focus on touch
+    // (which pops the VKB on every tap including scrolls). VKB is controlled externally.
+    if (isTouchDevice) {
+      this.#host.addEventListener('touchend', function(ev) { ev.stopPropagation(); }, true);
+
+      // On mobile, the contenteditable host div receives focus (not the textarea),
+      // so ghostty-web's InputHandler never sees keystrokes. Intercept beforeinput
+      // on the host and forward as terminal input.
+      var self = this;
+      this.#host.addEventListener('beforeinput', function(ev) {
+        if (ev.target !== self.#host) return; // only intercept events targeting the host
+        var data = null;
+        switch (ev.inputType) {
+          case 'insertText':
+          case 'insertReplacementText':
+            data = (ev.data || '').replace(/\n/g, '\r');
+            break;
+          case 'insertLineBreak':
+          case 'insertParagraph':
+            data = '\r';
+            break;
+          case 'deleteContentBackward':
+            data = '\x7f';
+            break;
+          case 'deleteContentForward':
+            data = '\x1b[3~';
+            break;
+          default:
+            return;
+        }
+        if (!data) return;
+        ev.preventDefault();
+        ev.stopPropagation();
+        var payload = textEncoder.encode(data);
+        self.dispatchEvent(new CustomEvent('terminal-input', {
+          bubbles: true,
+          detail: { name: self.getAttribute('name') || '', data: payload }
+        }));
+      });
+    }
+
     // ResizeObserver watches the custom element itself
     this.#resizeObserver = new ResizeObserver(() => { this.#fit(); });
     this.#resizeObserver.observe(this);
@@ -270,7 +313,21 @@ export class TmuxAdapterWeb extends HTMLElement {
   }
 
   focus() {
-    if (this.#terminal) this.#terminal.focus();
+    if (!this.#terminal) return;
+    // On touch devices, don't auto-focus — VKB is controlled externally.
+    if (!isTouchDevice) this.#terminal.focus();
+  }
+
+  focusTextarea() {
+    if (!this.#host) return;
+    // On mobile, focus the contenteditable host div — our beforeinput handler
+    // intercepts keystrokes and dispatches terminal-input events.
+    this.#host.focus();
+  }
+
+  blurTextarea() {
+    if (!this.#host) return;
+    this.#host.blur();
   }
 
   // --- Internal methods ---
@@ -302,19 +359,21 @@ export class TmuxAdapterWeb extends HTMLElement {
       clearTimeout(this.#resizeRevealTimer);
       this.#resizeRevealTimer = null;
     }
-    this.#host.style.visibility = '';
+    if (!isTouchDevice) this.#host.style.visibility = '';
   }
 
   #markResizePending() {
     if (this.#pendingInitialPaint) return;
     this.#pendingResizePaint = true;
-    this.#host.style.visibility = 'hidden';
+    // On touch devices, don't hide the host during resize — hiding it blurs the
+    // textarea which dismisses the VKB, causing an infinite resize loop.
+    if (!isTouchDevice) this.#host.style.visibility = 'hidden';
 
     if (this.#resizeRevealTimer) clearTimeout(this.#resizeRevealTimer);
     this.#resizeRevealTimer = setTimeout(() => {
       this.#resizeRevealTimer = null;
       this.#pendingResizePaint = false;
-      this.#host.style.visibility = '';
+      if (!isTouchDevice) this.#host.style.visibility = '';
       this.#fit();
     }, RESIZE_REVEAL_TIMEOUT_MS);
   }
