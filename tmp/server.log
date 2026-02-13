@@ -692,3 +692,243 @@
 2026/02/12 15:23:13 unhandled tmux notification: %unlinked-window-renamed @61 [tmux]
 2026/02/12 15:23:16 unhandled tmux notification: %pane-mode-changed %144
 2026/02/12 15:23:17 unhandled tmux notification: %unlinked-window-renamed @61 2.1.39
+2026/02/12 15:29:03 client disconnected (0 remaining)
+2026/02/12 15:30:21 tmux monitor session create (adapter-monitor): exit status 1
+2026/02/12 15:30:21 connected to tmux control mode
+2026/02/12 15:30:21 agent registry started (3 agents found)
+2026/02/12 15:30:21 Dashboard at http://localhost:8080/
+2026/02/12 15:30:21 WebSocket server listening on ws://localhost:8080/ws
+2026/02/12 15:30:21 watching gastown at /Users/csells/gt
+2026/02/12 15:40:47 client connected (1 total)
+2026/02/12 15:40:48 subscribe-output(hq-mayor): starting pipe-pane
+2026/02/12 15:40:48 subscribe-output(hq-mayor): pipe-pane active
+2026/02/12 15:40:48 binary resize hq-mayor -> 154x46
+2026/02/12 15:40:48 binary resize hq-mayor -> 154x46
+2026/02/12 15:40:50 client disconnected (0 remaining)
+2026/02/12 15:40:50 client connected (1 total)
+2026/02/12 15:40:52 client disconnected (0 remaining)
+2026/02/12 15:40:57 client connected (1 total)
+2026/02/12 15:40:59 subscribe-output(hq-mayor): starting pipe-pane
+2026/02/12 15:40:59 subscribe-output(hq-mayor): pipe-pane active
+2026/02/12 15:40:59 binary resize hq-mayor -> 154x46
+2026/02/12 15:40:59 binary resize hq-mayor -> 154x46
+2026/02/12 15:41:35 unhandled tmux notification: %pane-mode-changed %144
+2026/02/12 15:41:35 unhandled tmux notification: %unlinked-window-renamed @61 [tmux]
+2026/02/12 15:41:36 unhandled tmux notification: %pane-mode-changed %144
+2026/02/12 15:41:36 unhandled tmux notification: %unlinked-window-renamed @61 2.1.39
+2026/02/12 15:42:18 client disconnected (0 remaining)
+2026/02/12 15:42:23 client connected (1 total)
+2026/02/12 15:42:26 subscribe-output(gt-hello_gastown-crew-bob): starting pipe-pane
+2026/02/12 15:42:26 subscribe-output(gt-hello_gastown-crew-bob): pipe-pane active
+2026/02/12 15:42:26 binary resize gt-hello_gastown-crew-bob -> 154x46
+2026/02/12 15:42:26 binary resize gt-hello_gastown-crew-bob -> 154x46
+2026/02/12 15:42:34 binary resize gt-hello_gastown-crew-bob -> 109x45
+2026/02/12 15:42:35 binary resize gt-hello_gastown-crew-bob -> 100x46
+2026/02/12 15:42:35 binary resize gt-hello_gastown-crew-bob -> 120x46
+2026/02/12 15:42:36 binary resize gt-hello_gastown-crew-bob -> 154x46
+2026/02/12 15:42:38 client disconnected (0 remaining)
+2026/02/12 15:42:38 client connected (1 total)
+2026/02/12 15:42:39 subscribe-output(gt-hello_gastown-crew-bob): starting pipe-pane
+2026/02/12 15:42:39 subscribe-output(gt-hello_gastown-crew-bob): pipe-pane active
+2026/02/12 15:42:39 binary resize gt-hello_gastown-crew-bob -> 154x46
+2026/02/12 15:42:39 binary resize gt-hello_gastown-crew-bob -> 154x46
+2026/02/12 15:42:43 binary resize gt-hello_gastown-crew-bob -> 118x46
+2026/02/12 15:42:43 binary resize gt-hello_gastown-crew-bob -> 106x45
+2026/02/12 15:42:44 binary resize gt-hello_gastown-crew-bob -> 98x46
+2026/02/12 15:42:45 binary resize gt-hello_gastown-crew-bob -> 109x46
+2026/02/12 15:42:45 binary resize gt-hello_gastown-crew-bob -> 123x46
+2026/02/12 15:42:45 binary resize gt-hello_gastown-crew-bob -> 126x46
+2026/02/12 15:42:45 binary resize gt-hello_gastown-crew-bob -> 142x46
+2026/02/12 15:42:46 binary resize gt-hello_gastown-crew-bob -> 154x46
+2026/02/12 15:42:47 subscribe-output(hq-deacon): starting pipe-pane
+2026/02/12 15:42:47 subscribe-output(hq-deacon): pipe-pane active
+2026/02/12 15:42:47 binary resize hq-deacon -> 154x46
+2026/02/12 15:42:47 binary resize hq-deacon -> 154x46
+2026/02/12 15:42:49 binary resize hq-deacon -> 83x46
+2026/02/12 15:42:49 binary resize hq-deacon -> 106x46
+2026/02/12 15:42:50 binary resize hq-deacon -> 95x45
+2026/02/12 15:42:51 binary resize hq-deacon -> 154x46
+2026/02/12 15:42:52 subscribe-output(hq-mayor): starting pipe-pane
+2026/02/12 15:42:52 subscribe-output(hq-mayor): pipe-pane active
+2026/02/12 15:42:52 binary resize hq-mayor -> 154x46
+2026/02/12 15:42:52 binary resize hq-mayor -> 154x46
+2026/02/12 15:42:53 binary resize hq-mayor -> 82x46
+2026/02/12 15:42:53 binary resize hq-mayor -> 110x45
+2026/02/12 15:42:54 binary resize hq-mayor -> 154x46
+2026/02/12 15:42:56 binary resize hq-mayor -> 120x46
+2026/02/12 15:42:56 binary resize hq-mayor -> 94x46
+2026/02/12 15:43:29 client disconnected (0 remaining)
+2026/02/12 15:43:29 client connected (1 total)
+2026/02/12 15:43:34 subscribe-output(hq-deacon): starting pipe-pane
+2026/02/12 15:43:34 subscribe-output(hq-deacon): pipe-pane active
+2026/02/12 15:43:34 binary resize hq-deacon -> 112x46
+2026/02/12 15:43:34 binary resize hq-deacon -> 112x46
+2026/02/12 15:43:36 subscribe-output(hq-mayor): starting pipe-pane
+2026/02/12 15:43:36 subscribe-output(hq-mayor): pipe-pane active
+2026/02/12 15:43:36 binary resize hq-mayor -> 112x46
+2026/02/12 15:43:36 binary resize hq-mayor -> 112x46
+2026/02/12 15:43:36 subscribe-output(hq-deacon): starting pipe-pane
+2026/02/12 15:43:36 subscribe-output(hq-deacon): pipe-pane active
+2026/02/12 15:43:36 binary resize hq-deacon -> 112x46
+2026/02/12 15:43:37 subscribe-output(gt-hello_gastown-crew-bob): starting pipe-pane
+2026/02/12 15:43:37 subscribe-output(gt-hello_gastown-crew-bob): pipe-pane active
+2026/02/12 15:43:37 binary resize gt-hello_gastown-crew-bob -> 112x46
+2026/02/12 15:43:37 binary resize gt-hello_gastown-crew-bob -> 112x46
+2026/02/12 15:43:38 subscribe-output(hq-deacon): starting pipe-pane
+2026/02/12 15:43:38 subscribe-output(hq-deacon): pipe-pane active
+2026/02/12 15:43:38 binary resize hq-deacon -> 112x46
+2026/02/12 15:43:39 subscribe-output(hq-mayor): starting pipe-pane
+2026/02/12 15:43:39 subscribe-output(hq-mayor): pipe-pane active
+2026/02/12 15:43:39 binary resize hq-mayor -> 112x46
+2026/02/12 15:43:40 subscribe-output(hq-deacon): starting pipe-pane
+2026/02/12 15:43:40 subscribe-output(hq-deacon): pipe-pane active
+2026/02/12 15:43:40 binary resize hq-deacon -> 112x46
+2026/02/12 15:43:41 subscribe-output(gt-hello_gastown-crew-bob): starting pipe-pane
+2026/02/12 15:43:41 subscribe-output(gt-hello_gastown-crew-bob): pipe-pane active
+2026/02/12 15:43:41 binary resize gt-hello_gastown-crew-bob -> 112x46
+2026/02/12 15:43:41 subscribe-output(hq-deacon): starting pipe-pane
+2026/02/12 15:43:41 subscribe-output(hq-deacon): pipe-pane active
+2026/02/12 15:43:41 binary resize hq-deacon -> 112x46
+2026/02/12 15:43:42 subscribe-output(hq-mayor): starting pipe-pane
+2026/02/12 15:43:42 subscribe-output(hq-mayor): pipe-pane active
+2026/02/12 15:43:42 binary resize hq-mayor -> 112x46
+2026/02/12 15:44:53 unhandled tmux notification: %pane-mode-changed %144
+2026/02/12 15:44:53 unhandled tmux notification: %unlinked-window-renamed @61 [tmux]
+2026/02/12 15:44:54 unhandled tmux notification: %pane-mode-changed %144
+2026/02/12 15:44:54 unhandled tmux notification: %unlinked-window-renamed @61 2.1.39
+2026/02/12 15:44:55 unhandled tmux notification: %pane-mode-changed %144
+2026/02/12 15:44:55 unhandled tmux notification: %unlinked-window-renamed @61 [tmux]
+2026/02/12 15:45:06 unhandled tmux notification: %pane-mode-changed %144
+2026/02/12 15:45:06 unhandled tmux notification: %unlinked-window-renamed @61 2.1.39
+2026/02/12 15:49:26 unhandled tmux notification: %pane-mode-changed %144
+2026/02/12 15:49:27 unhandled tmux notification: %unlinked-window-renamed @61 [tmux]
+2026/02/12 15:49:27 unhandled tmux notification: %pane-mode-changed %144
+2026/02/12 15:49:27 unhandled tmux notification: %unlinked-window-renamed @61 2.1.39
+2026/02/12 15:50:16 tmux monitor session create (adapter-monitor): exit status 1
+2026/02/12 15:50:16 connected to tmux control mode
+2026/02/12 15:50:17 agent registry started (3 agents found)
+2026/02/12 15:50:17 Dashboard at http://localhost:8080/
+2026/02/12 15:50:17 WebSocket server listening on ws://localhost:8080/ws
+2026/02/12 15:50:17 watching gastown at /Users/csells/gt
+2026/02/12 15:50:18 client connected (1 total)
+2026/02/12 15:50:18 subscribe-output(hq-mayor): starting pipe-pane
+2026/02/12 15:50:18 subscribe-output(hq-mayor): pipe-pane active
+2026/02/12 15:50:18 binary resize hq-mayor -> 112x46
+2026/02/12 15:56:37 tmux monitor session create (adapter-monitor): exit status 1
+2026/02/12 15:56:37 connected to tmux control mode
+2026/02/12 15:56:37 agent registry started (3 agents found)
+2026/02/12 15:56:37 Dashboard at http://localhost:8080/
+2026/02/12 15:56:37 WebSocket server listening on ws://localhost:8080/ws
+2026/02/12 15:56:37 watching gastown at /Users/csells/gt
+2026/02/12 15:56:38 client connected (1 total)
+2026/02/12 15:56:38 subscribe-output(hq-mayor): starting pipe-pane
+2026/02/12 15:56:38 subscribe-output(hq-mayor): pipe-pane active
+2026/02/12 15:56:38 binary resize hq-mayor -> 112x46
+2026/02/12 16:02:36 client disconnected (0 remaining)
+2026/02/12 16:02:41 client connected (1 total)
+2026/02/12 16:03:27 binary resize hq-mayor -> 112x46
+2026/02/12 16:03:27 subscribe-output(hq-mayor): starting pipe-pane
+2026/02/12 16:03:27 subscribe-output(hq-mayor): pipe-pane active
+2026/02/12 16:03:27 binary resize hq-mayor -> 112x46
+2026/02/12 16:03:30 client disconnected (0 remaining)
+2026/02/12 16:03:37 client connected (1 total)
+2026/02/12 16:03:38 binary resize hq-mayor -> 112x46
+2026/02/12 16:03:38 subscribe-output(hq-mayor): starting pipe-pane
+2026/02/12 16:03:38 subscribe-output(hq-mayor): pipe-pane active
+2026/02/12 16:03:38 binary resize hq-mayor -> 112x46
+2026/02/12 16:09:53 unhandled tmux notification: %pane-mode-changed %144
+2026/02/12 16:09:53 unhandled tmux notification: %unlinked-window-renamed @61 [tmux]
+2026/02/12 16:10:25 unhandled tmux notification: %pane-mode-changed %144
+2026/02/12 16:10:25 unhandled tmux notification: %unlinked-window-renamed @61 2.1.39
+2026/02/12 16:27:00 tmux monitor session create (adapter-monitor): exit status 1
+2026/02/12 16:27:00 connected to tmux control mode
+2026/02/12 16:27:00 agent registry started (3 agents found)
+2026/02/12 16:27:00 Dashboard at http://localhost:8080/
+2026/02/12 16:27:00 WebSocket server listening on ws://localhost:8080/ws
+2026/02/12 16:27:00 watching gastown at /Users/csells/gt
+2026/02/12 16:27:02 client connected (1 total)
+2026/02/12 16:27:02 binary resize hq-mayor -> 112x46
+2026/02/12 16:27:02 subscribe-output(hq-mayor): starting pipe-pane
+2026/02/12 16:27:02 subscribe-output(hq-mayor): pipe-pane active
+2026/02/12 16:33:17 tmux monitor session create (adapter-monitor): exit status 1
+2026/02/12 16:33:17 connected to tmux control mode
+2026/02/12 16:33:17 agent registry started (3 agents found)
+2026/02/12 16:33:17 Dashboard at http://localhost:8080/
+2026/02/12 16:33:17 WebSocket server listening on ws://localhost:8080/ws
+2026/02/12 16:33:17 watching gastown at /Users/csells/gt
+2026/02/12 16:33:19 client connected (1 total)
+2026/02/12 16:33:19 binary resize hq-mayor -> 112x46
+2026/02/12 16:33:19 subscribe-output(hq-mayor): starting pipe-pane
+2026/02/12 16:33:19 subscribe-output(hq-mayor): pipe-pane active
+2026/02/12 16:36:44 binary resize gt-hello_gastown-crew-bob -> 112x46
+2026/02/12 16:36:44 subscribe-output(gt-hello_gastown-crew-bob): starting pipe-pane
+2026/02/12 16:36:44 subscribe-output(gt-hello_gastown-crew-bob): pipe-pane active
+2026/02/12 16:36:44 binary resize gt-hello_gastown-crew-bob -> 112x46
+2026/02/12 16:36:45 binary resize hq-deacon -> 112x46
+2026/02/12 16:36:45 subscribe-output(hq-deacon): starting pipe-pane
+2026/02/12 16:36:45 subscribe-output(hq-deacon): pipe-pane active
+2026/02/12 16:36:45 binary resize hq-deacon -> 112x46
+2026/02/12 16:36:46 binary resize hq-mayor -> 112x46
+2026/02/12 16:36:46 subscribe-output(hq-mayor): starting pipe-pane
+2026/02/12 16:36:46 subscribe-output(hq-mayor): pipe-pane active
+2026/02/12 16:36:47 client disconnected (0 remaining)
+2026/02/12 16:36:47 client connected (1 total)
+2026/02/12 16:36:48 binary resize hq-mayor -> 112x46
+2026/02/12 16:36:48 subscribe-output(hq-mayor): starting pipe-pane
+2026/02/12 16:36:48 subscribe-output(hq-mayor): pipe-pane active
+2026/02/12 16:36:48 binary resize hq-mayor -> 112x46
+2026/02/12 16:36:49 binary resize hq-deacon -> 112x46
+2026/02/12 16:36:49 subscribe-output(hq-deacon): starting pipe-pane
+2026/02/12 16:36:49 subscribe-output(hq-deacon): pipe-pane active
+2026/02/12 16:36:49 binary resize hq-deacon -> 112x46
+2026/02/12 16:36:50 binary resize gt-hello_gastown-crew-bob -> 112x46
+2026/02/12 16:36:50 subscribe-output(gt-hello_gastown-crew-bob): starting pipe-pane
+2026/02/12 16:36:50 subscribe-output(gt-hello_gastown-crew-bob): pipe-pane active
+2026/02/12 16:36:50 binary resize gt-hello_gastown-crew-bob -> 112x46
+2026/02/12 16:36:51 client disconnected (0 remaining)
+2026/02/12 16:36:56 client connected (1 total)
+2026/02/12 16:36:57 binary resize hq-mayor -> 112x46
+2026/02/12 16:36:57 subscribe-output(hq-mayor): starting pipe-pane
+2026/02/12 16:36:57 subscribe-output(hq-mayor): pipe-pane active
+2026/02/12 16:36:57 binary resize hq-mayor -> 112x46
+2026/02/12 16:36:58 binary resize hq-deacon -> 112x46
+2026/02/12 16:36:58 subscribe-output(hq-deacon): starting pipe-pane
+2026/02/12 16:36:58 subscribe-output(hq-deacon): pipe-pane active
+2026/02/12 16:36:58 binary resize hq-deacon -> 112x46
+2026/02/12 16:36:59 binary resize gt-hello_gastown-crew-bob -> 112x46
+2026/02/12 16:36:59 subscribe-output(gt-hello_gastown-crew-bob): starting pipe-pane
+2026/02/12 16:36:59 subscribe-output(gt-hello_gastown-crew-bob): pipe-pane active
+2026/02/12 16:36:59 binary resize gt-hello_gastown-crew-bob -> 112x46
+2026/02/12 16:38:53 client disconnected (0 remaining)
+2026/02/12 16:38:57 client connected (1 total)
+2026/02/12 16:38:58 binary resize gt-hello_gastown-crew-bob -> 112x46
+2026/02/12 16:38:58 subscribe-output(gt-hello_gastown-crew-bob): starting pipe-pane
+2026/02/12 16:38:58 subscribe-output(gt-hello_gastown-crew-bob): pipe-pane active
+2026/02/12 16:38:58 binary resize gt-hello_gastown-crew-bob -> 112x46
+2026/02/12 16:39:01 binary resize hq-deacon -> 112x46
+2026/02/12 16:39:01 subscribe-output(hq-deacon): starting pipe-pane
+2026/02/12 16:39:01 subscribe-output(hq-deacon): pipe-pane active
+2026/02/12 16:39:01 binary resize hq-deacon -> 112x46
+2026/02/12 16:39:01 binary resize hq-mayor -> 112x46
+2026/02/12 16:39:01 subscribe-output(hq-mayor): starting pipe-pane
+2026/02/12 16:39:01 subscribe-output(hq-mayor): pipe-pane active
+2026/02/12 16:39:01 binary resize hq-mayor -> 112x46
+2026/02/12 16:39:07 binary resize hq-mayor -> 106x46
+2026/02/12 16:39:08 binary resize hq-mayor -> 111x46
+2026/02/12 16:39:08 binary resize hq-mayor -> 119x46
+2026/02/12 16:39:09 binary resize hq-mayor -> 123x46
+2026/02/12 16:39:09 binary resize hq-mayor -> 127x46
+2026/02/12 16:39:10 binary resize hq-mayor -> 97x46
+2026/02/12 16:39:11 binary resize hq-mayor -> 122x46
+2026/02/12 16:39:24 binary resize hq-deacon -> 122x46
+2026/02/12 16:39:24 subscribe-output(hq-deacon): starting pipe-pane
+2026/02/12 16:39:24 subscribe-output(hq-deacon): pipe-pane active
+2026/02/12 16:39:24 binary resize hq-deacon -> 122x46
+2026/02/12 16:39:25 binary resize hq-mayor -> 122x46
+2026/02/12 16:39:25 subscribe-output(hq-mayor): starting pipe-pane
+2026/02/12 16:39:25 subscribe-output(hq-mayor): pipe-pane active
+2026/02/12 16:40:32 client disconnected (0 remaining)
+2026/02/12 16:40:34 client connected (1 total)
+2026/02/12 16:40:34 binary resize hq-mayor -> 122x46
+2026/02/12 16:40:34 subscribe-output(hq-mayor): starting pipe-pane
+2026/02/12 16:40:34 subscribe-output(hq-mayor): pipe-pane active

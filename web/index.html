@@ -235,6 +235,36 @@
     text-align: center;
   }
 
+  .agent-list-state {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    min-height: 56px;
+    padding: 12px;
+    color: #8b949e;
+    font-size: 12px;
+    text-align: center;
+  }
+
+  .agent-list-state.timeout {
+    color: #f0883e;
+  }
+
+  .spinner {
+    width: 12px;
+    height: 12px;
+    border: 2px solid #30363d;
+    border-top-color: #58a6ff;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    flex-shrink: 0;
+  }
+
+  @keyframes spin {
+    to { transform: rotate(360deg); }
+  }
+
   .mobile-nav-btn,
   .sidebar-close {
     display: none;
@@ -400,7 +430,7 @@
       <span class="sidebar-title">Agents</span>
     </div>
     <div class="agent-list" id="agent-list">
-      <div class="empty-sidebar">No agents running</div>
+      <div class="agent-list-state"><span class="spinner"></span><span>Loading agents...</span></div>
     </div>
   </div>
 
@@ -433,14 +463,24 @@ var ws = null;
 var textEncoder = new TextEncoder();
 var textDecoder = new TextDecoder();
 var pendingInitialPaint = new Set(); // agent names waiting for first snapshot paint
+var pendingResizePaint = new Set();  // agent names waiting for post-resize repaint
+var resizeSendTimers = new Map();    // agent -> debounce timer id
+var resizeRevealTimers = new Map();  // agent -> safety reveal timer id
+var agentsLoading = true;
+var agentsLoadTimedOut = false;
+var agentsLoadTimer = null;
 
 var BinaryTerminalOutput = 0x01;
 var BinaryKeyboardInput = 0x02;
 var BinaryResize = 0x03;
 var BinaryFileUpload = 0x04;
+var BinaryTerminalSnapshot = 0x05;
 
 var MaxUploadBytes = 8 * 1024 * 1024;
 var MinTerminalCols = 80;
+var ResizeSendDebounceMs = 90;
+var ResizeRevealTimeoutMs = 260;
+var AgentsLoadTimeoutMs = 7000;
 
 // --- DOM refs ---
 var agentListEl  = document.getElementById('agent-list');
@@ -463,6 +503,100 @@ function createBadge(text, classNames) {
 
 function clearChildren(el) {
   while (el.firstChild) el.removeChild(el.firstChild);
+}
+
+function setTerminalHostVisibility(agentName, visible) {
+  var entry = terminals.get(agentName);
+  if (!entry) return;
+  entry.host.style.visibility = visible ? '' : 'hidden';
+}
+
+function clearAgentsLoadTimer() {
+  if (!agentsLoadTimer) return;
+  clearTimeout(agentsLoadTimer);
+  agentsLoadTimer = null;
+}
+
+function startAgentsLoading() {
+  agentsLoading = true;
+  agentsLoadTimedOut = false;
+  clearAgentsLoadTimer();
+  agentsLoadTimer = setTimeout(function() {
+    if (!agentsLoading) return;
+    agentsLoading = false;
+    agentsLoadTimedOut = true;
+    renderAgentList();
+  }, AgentsLoadTimeoutMs);
+  renderAgentList();
+}
+
+function markAgentsLoaded() {
+  agentsLoading = false;
+  agentsLoadTimedOut = false;
+  clearAgentsLoadTimer();
+}
+
+function clearResizeRevealTimer(agentName) {
+  var timer = resizeRevealTimers.get(agentName);
+  if (timer) {
+    clearTimeout(timer);
+    resizeRevealTimers.delete(agentName);
+  }
+}
+
+function finishResizePending(agentName) {
+  if (!pendingResizePaint.has(agentName)) return;
+  pendingResizePaint.delete(agentName);
+  clearResizeRevealTimer(agentName);
+  setTerminalHostVisibility(agentName, true);
+}
+
+function markResizePending(agentName) {
+  if (pendingInitialPaint.has(agentName)) return;
+  pendingResizePaint.add(agentName);
+  setTerminalHostVisibility(agentName, false);
+  clearResizeRevealTimer(agentName);
+
+  var timer = setTimeout(function() {
+    pendingResizePaint.delete(agentName);
+    resizeRevealTimers.delete(agentName);
+    setTerminalHostVisibility(agentName, true);
+    var entry = terminals.get(agentName);
+    if (entry && entry.wrapper.classList.contains('active')) {
+      fitTerminal(entry);
+    }
+  }, ResizeRevealTimeoutMs);
+  resizeRevealTimers.set(agentName, timer);
+}
+
+function scheduleResizeSend(agentName, cols, rows) {
+  var timer = resizeSendTimers.get(agentName);
+  if (timer) clearTimeout(timer);
+  resizeSendTimers.set(agentName, setTimeout(function() {
+    resizeSendTimers.delete(agentName);
+    var payload = textEncoder.encode(cols + ':' + rows);
+    sendBinary(BinaryResize, agentName, payload);
+  }, ResizeSendDebounceMs));
+}
+
+function sendResizeNow(agentName) {
+  var entry = terminals.get(agentName);
+  if (!entry) return false;
+  fitTerminal(entry);
+  var payload = textEncoder.encode(entry.terminal.cols + ':' + entry.terminal.rows);
+  sendBinary(BinaryResize, agentName, payload);
+  return true;
+}
+
+function subscribeOutputWithSizedSnapshot(agentName) {
+  if (!agentName) return;
+
+  requestAnimationFrame(function() {
+    // Ensure the pane size is pushed before subscribe-output so snapshot capture
+    // happens at the same geometry the browser will render.
+    sendResizeNow(agentName);
+    send({ type: 'subscribe-output', agent: agentName });
+  });
 }
 
 function isMobileLayout() {
@@ -625,8 +759,10 @@ function getOrCreateTerminal(agentName) {
 
   // Terminal resize -> server via binary
   terminal.onResize(function(size) {
-    var payload = textEncoder.encode(size.cols + ':' + size.rows);
-    sendBinary(BinaryResize, agentName, payload);
+    if (!pendingInitialPaint.has(agentName)) {
+      markResizePending(agentName);
+    }
+    scheduleResizeSend(agentName, size.cols, size.rows);
   });
 
   wireFileTransferHandlers(wrapper, agentName);
@@ -647,7 +783,7 @@ function showTerminal(agentName) {
   // Show or create the target terminal
   var entry = getOrCreateTerminal(agentName);
   entry.wrapper.classList.add('active');
-  entry.host.style.visibility = pendingInitialPaint.has(agentName) ? 'hidden' : '';
+  entry.host.style.visibility = (pendingInitialPaint.has(agentName) || pendingResizePaint.has(agentName)) ? 'hidden' : '';
   placeholderEl.style.display = 'none';
 
   // Fit after layout settles, then focus for immediate typing
@@ -808,20 +944,28 @@ function connect() {
   ws.onopen = function() {
     statusDot.classList.remove('disconnected');
     statusText.textContent = 'Connected';
+    if (agents.size === 0) {
+      startAgentsLoading();
+    }
     send({ type: 'subscribe-agents' });
 
     // Re-subscribe to selected agent's output
     if (selectedAgent) {
+      finishResizePending(selectedAgent);
       pendingInitialPaint.add(selectedAgent);
       var selectedEntry = terminals.get(selectedAgent);
       if (selectedEntry) selectedEntry.host.style.visibility = 'hidden';
-      send({ type: 'subscribe-output', agent: selectedAgent });
+      showTerminal(selectedAgent);
+      subscribeOutputWithSizedSnapshot(selectedAgent);
     }
   };
 
   ws.onclose = function() {
     statusDot.classList.add('disconnected');
     statusText.textContent = 'Disconnected';
+    if (agents.size === 0) {
+      startAgentsLoading();
+    }
     setTimeout(connect, 2000);
   };
 
@@ -845,37 +989,61 @@ function send(obj) {
 function handleBinaryMessage(buffer) {
   var parsed = parseBinaryMessage(buffer);
 
-  if (parsed.msgType === BinaryTerminalOutput) {
-    // Terminal output — write to the agent's terminal
-    var entry = terminals.get(parsed.agentName);
-    if (entry) {
-      var isInitialPaint = pendingInitialPaint.has(parsed.agentName);
-      if (isInitialPaint) {
-        entry.host.style.visibility = 'hidden';
-        entry.terminal.write(parsed.payload);
-        requestAnimationFrame(function() {
-          requestAnimationFrame(function() {
-            pendingInitialPaint.delete(parsed.agentName);
-            entry.host.style.visibility = '';
-            if (entry.wrapper.classList.contains('active')) {
-              fitTerminal(entry);
-            }
-          });
-        });
-        return;
-      }
+  var entry = terminals.get(parsed.agentName);
+  if (!entry) return;
 
-      var savedY = getViewportY(entry.terminal);
-      var atBottom = isAtBottom(entry.terminal, savedY);
-      entry.terminal.write(parsed.payload);
-
-      // ghostty-web write() is synchronous, and rendering happens on the next
-      // animation frame. Restoring immediately avoids a visible "jump to bottom
-      // then back" flash while preserving sticky scroll.
-      if (!atBottom && typeof entry.terminal.scrollToLine === 'function') {
-        entry.terminal.scrollToLine(savedY);
-      }
+  if (parsed.msgType === BinaryTerminalSnapshot) {
+    setTerminalHostVisibility(parsed.agentName, false);
+    if (typeof entry.terminal.reset === 'function') {
+      entry.terminal.reset();
+      entry.terminal.write('\x1b[?25l');
+    } else if (typeof entry.terminal.clear === 'function') {
+      entry.terminal.clear();
     }
+    entry.terminal.write(parsed.payload);
+
+    requestAnimationFrame(function() {
+      requestAnimationFrame(function() {
+        pendingInitialPaint.delete(parsed.agentName);
+        finishResizePending(parsed.agentName);
+        setTerminalHostVisibility(parsed.agentName, true);
+        if (entry.wrapper.classList.contains('active')) {
+          fitTerminal(entry);
+        }
+      });
+    });
+    return;
+  }
+
+  if (parsed.msgType !== BinaryTerminalOutput) {
+    return;
+  }
+
+  // Terminal output — append incremental stream bytes.
+  if (pendingInitialPaint.has(parsed.agentName) || pendingResizePaint.has(parsed.agentName)) {
+    entry.terminal.write(parsed.payload);
+    requestAnimationFrame(function() {
+      requestAnimationFrame(function() {
+        pendingInitialPaint.delete(parsed.agentName);
+        finishResizePending(parsed.agentName);
+        setTerminalHostVisibility(parsed.agentName, true);
+        if (entry.wrapper.classList.contains('active')) {
+          fitTerminal(entry);
+        }
+      });
+    });
+    return;
+  }
+
+  var savedY = getViewportY(entry.terminal);
+  var atBottom = isAtBottom(entry.terminal, savedY);
+  entry.terminal.write(parsed.payload);
+
+  // ghostty-web write() is synchronous, and rendering happens on the next
+  // animation frame. Restoring immediately avoids a visible "jump to bottom
+  // then back" flash while preserving sticky scroll.
+  if (!atBottom && typeof entry.terminal.scrollToLine === 'function') {
+    entry.terminal.scrollToLine(savedY);
   }
 }
 
@@ -883,7 +1051,9 @@ function handleBinaryMessage(buffer) {
 function handleJsonMessage(msg) {
   switch (msg.type) {
     case 'subscribe-agents':
+      agents.clear();
       if (msg.agents) msg.agents.forEach(function(a) { agents.set(a.name, a); });
+      markAgentsLoaded();
       renderAgentList();
       break;
 
@@ -895,6 +1065,14 @@ function handleJsonMessage(msg) {
     case 'agent-removed':
       var removedName = msg.name || (msg.agent && msg.agent.name);
       if (removedName) {
+        pendingInitialPaint.delete(removedName);
+        finishResizePending(removedName);
+        clearResizeRevealTimer(removedName);
+        var resizeSendTimer = resizeSendTimers.get(removedName);
+        if (resizeSendTimer) {
+          clearTimeout(resizeSendTimer);
+          resizeSendTimers.delete(removedName);
+        }
         agents.delete(removedName);
         // Clean up terminal
         var removed = terminals.get(removedName);
@@ -914,20 +1092,7 @@ function handleJsonMessage(msg) {
       break;
 
     case 'subscribe-output':
-      if (msg.ok && selectedAgent) {
-        // Pipe-pane is now active — show terminal and force a resize.
-        // The resize triggers SIGWINCH → app redraws → pipe-pane captures it.
-        showTerminal(selectedAgent);
-        var entry = terminals.get(selectedAgent);
-        if (entry) {
-          requestAnimationFrame(function() {
-            fitTerminal(entry);
-            // Always send resize to guarantee a redraw through pipe-pane
-            var payload = textEncoder.encode(entry.terminal.cols + ':' + entry.terminal.rows);
-            sendBinary(BinaryResize, selectedAgent, payload);
-          });
-        }
-      }
+      // subscribe-output ack only confirms streaming is active.
       break;
 
     case 'send-prompt':
@@ -944,10 +1109,23 @@ function handleJsonMessage(msg) {
 function renderAgentList() {
   clearChildren(agentListEl);
 
+  if (agentsLoading) {
+    var loading = document.createElement('div');
+    loading.className = 'agent-list-state';
+    var spinner = document.createElement('span');
+    spinner.className = 'spinner';
+    loading.appendChild(spinner);
+    var loadingText = document.createElement('span');
+    loadingText.textContent = 'Loading agents...';
+    loading.appendChild(loadingText);
+    agentListEl.appendChild(loading);
+    return;
+  }
+
   if (agents.size === 0) {
     var empty = document.createElement('div');
-    empty.className = 'empty-sidebar';
-    empty.textContent = 'No agents running';
+    empty.className = 'agent-list-state' + (agentsLoadTimedOut ? ' timeout' : '');
+    empty.textContent = agentsLoadTimedOut ? 'Agent list load timed out' : 'No agents running';
     agentListEl.appendChild(empty);
     return;
   }
@@ -999,17 +1177,17 @@ function selectAgent(name) {
   }
 
   selectedAgent = name;
+  finishResizePending(name);
   pendingInitialPaint.add(name);
   updateHeader();
   renderAgentList();
 
   // Show terminal immediately so selection never appears "stuck" on placeholder.
-  // subscribe-output ack will still trigger a resize/redraw once streaming is active.
+  // subscribe-output is sent after we push current size to avoid bad initial wraps.
   showTerminal(name);
 
-  // Activate streaming; subscribe-output ack will trigger a redraw/resize once
-  // pipe-pane is confirmed active on the server.
-  send({ type: 'subscribe-output', agent: name });
+  // Push size first, then request snapshot+stream at that geometry.
+  subscribeOutputWithSizedSnapshot(name);
 
   if (isMobileLayout()) {
     closeDrawer();
@@ -1055,6 +1233,7 @@ function updateHeader() {
 
 // --- Boot ---
 bindMobileLayoutEvents();
+startAgentsLoading();
 connect();
 syncMobileNavButton();
 if (isMobileLayout() && !selectedAgent) {

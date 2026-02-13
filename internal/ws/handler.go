@@ -37,10 +37,11 @@ type Response struct {
 
 // Binary protocol message types
 const (
-	BinaryTerminalOutput byte = 0x01 // server → client: terminal output
-	BinaryKeyboardInput  byte = 0x02 // client → server: keyboard input
-	BinaryResize         byte = 0x03 // client → server: resize
-	BinaryFileUpload     byte = 0x04 // client → server: file upload for paste
+	BinaryTerminalOutput   byte = 0x01 // server → client: terminal output
+	BinaryKeyboardInput    byte = 0x02 // client → server: keyboard input
+	BinaryResize           byte = 0x03 // client → server: resize
+	BinaryFileUpload       byte = 0x04 // client → server: file upload for paste
+	BinaryTerminalSnapshot byte = 0x05 // server → client: terminal snapshot/refresh
 )
 
 // Per-agent mutexes for send-prompt serialization.
@@ -113,6 +114,18 @@ func handleBinaryMessage(c *Client, data []byte) {
 		if err := c.server.ctrl.ResizePaneTo(agentName, cols, rows); err != nil {
 			log.Printf("resize %s error: %v", agentName, err)
 			c.sendError("", "resize "+agentName+": "+err.Error())
+			return
+		}
+		if isSubscribedToOutput(c, agentName) {
+			if snap, err := c.server.ctrl.CapturePaneVisible(agentName); err != nil {
+				log.Printf("resize %s capture snapshot error: %v", agentName, err)
+			} else {
+				refreshPayload := []byte("\x1b[2J\x1b[H")
+				if snap != "" {
+					refreshPayload = append(refreshPayload, []byte(snap)...)
+				}
+				c.SendBinary(makeBinaryFrame(BinaryTerminalSnapshot, agentName, refreshPayload))
+			}
 		}
 	case BinaryFileUpload:
 		payloadCopy := append([]byte(nil), payload...)
@@ -215,6 +228,13 @@ func tmuxKeyNameFromVT(payload []byte) (string, bool) {
 		return "BSpace", true
 	}
 	return "", false
+}
+
+func isSubscribedToOutput(c *Client, agentName string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	_, ok := c.outputSubs[agentName]
+	return ok
 }
 
 // makeBinaryFrame builds a binary frame: msgType + agentName + \0 + payload
@@ -358,18 +378,27 @@ func handleSubscribeOutput(c *Client, req Request) {
 			OK:   &okVal,
 		})
 
-		// Prime the client with the full pane history immediately.
+		// Prime the client with full rich history and then repaint the visible screen.
+		// History preserves ANSI styling; visible repaint lands on the current frame.
 		// Without this, quiet sessions (e.g., paused agents) can appear blank
 		// until new output is emitted through pipe-pane.
-		if snap, err := c.server.ctrl.CapturePaneAll(req.Agent); err != nil {
-			log.Printf("subscribe-output(%s): capture snapshot error: %v", req.Agent, err)
+		fullHistory, err := c.server.ctrl.CapturePaneAll(req.Agent)
+		if err != nil {
+			log.Printf("subscribe-output(%s): capture full history error: %v", req.Agent, err)
 		} else {
-			// Clear old terminal contents before applying a fresh snapshot.
-			payload := []byte("\x1b[2J\x1b[H")
-			if snap != "" {
-				payload = append(payload, []byte(snap)...)
+			refreshPayload := make([]byte, 0, len(fullHistory)+1024)
+			if fullHistory != "" {
+				refreshPayload = append(refreshPayload, []byte(fullHistory)...)
 			}
-			c.SendBinary(makeBinaryFrame(BinaryTerminalOutput, req.Agent, payload))
+
+			refreshPayload = append(refreshPayload, []byte("\x1b[2J\x1b[H")...)
+			if visible, visErr := c.server.ctrl.CapturePaneVisible(req.Agent); visErr != nil {
+				log.Printf("subscribe-output(%s): capture visible snapshot error: %v", req.Agent, visErr)
+			} else if visible != "" {
+				refreshPayload = append(refreshPayload, []byte(visible)...)
+			}
+
+			c.SendBinary(makeBinaryFrame(BinaryTerminalSnapshot, req.Agent, refreshPayload))
 		}
 
 		// Stream raw bytes in background
