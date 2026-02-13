@@ -116,17 +116,7 @@ func handleBinaryMessage(c *Client, data []byte) {
 			c.sendError("", "resize "+agentName+": "+err.Error())
 			return
 		}
-		if isSubscribedToOutput(c, agentName) {
-			if snap, err := c.server.ctrl.CapturePaneVisible(agentName); err != nil {
-				log.Printf("resize %s capture snapshot error: %v", agentName, err)
-			} else {
-				refreshPayload := []byte("\x1b[2J\x1b[H")
-				if snap != "" {
-					refreshPayload = append(refreshPayload, []byte(snap)...)
-				}
-				c.SendBinary(makeBinaryFrame(BinaryTerminalOutput, agentName, refreshPayload))
-			}
-		}
+		// No snapshot needed — pipe-pane captures the app's SIGWINCH redraw naturally.
 	case BinaryFileUpload:
 		payloadCopy := append([]byte(nil), payload...)
 		go func() {
@@ -230,12 +220,6 @@ func tmuxKeyNameFromVT(payload []byte) (string, bool) {
 	return "", false
 }
 
-func isSubscribedToOutput(c *Client, agentName string) bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	_, ok := c.outputSubs[agentName]
-	return ok
-}
 
 // makeBinaryFrame builds a binary frame: msgType + agentName + \0 + payload
 func makeBinaryFrame(msgType byte, agentName string, payload []byte) []byte {
@@ -375,6 +359,26 @@ func handleSubscribeOutput(c *Client, req Request) {
 			Type: "subscribe-output",
 			OK:   &okVal,
 		})
+
+		// Brief pause for pipe-pane to activate, then drain any output the
+		// agent was already producing — we only want the controlled redraw.
+		time.Sleep(50 * time.Millisecond)
+		drained := 0
+	drain:
+		for {
+			select {
+			case _, ok := <-ch:
+				if !ok {
+					break drain
+				}
+				drained++
+			default:
+				break drain
+			}
+		}
+		if drained > 0 {
+			log.Printf("subscribe-output(%s): drained %d pre-redraw chunks", req.Agent, drained)
+		}
 
 		// Force a clean redraw. The resize dance triggers SIGWINCH, causing
 		// the app to repaint. pipe-pane captures all output in real-time.

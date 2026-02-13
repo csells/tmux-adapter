@@ -1061,16 +1061,7 @@ function handleBinaryMessage(buffer) {
 
   if (pendingResizePaint.has(parsed.agentName)) {
     entry.terminal.write(parsed.payload);
-    requestAnimationFrame(function() {
-      requestAnimationFrame(function() {
-        finishResizePending(parsed.agentName);
-        setTerminalHostVisibility(parsed.agentName, true);
-        if (entry.wrapper.classList.contains('active')) {
-          fitTerminal(entry);
-        }
-      });
-    });
-    return;
+    return;  // write silently — safety timeout handles reveal after app finishes redrawing
   }
 
   var savedY = getViewportY(entry.terminal);
