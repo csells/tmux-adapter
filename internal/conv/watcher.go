@@ -153,8 +153,10 @@ func (w *ConversationWatcher) Stop() {
 			fs.tailer.Stop()
 		}
 	}
-	for _, dw := range w.dirWatchers {
-		_ = dw.Close()
+	for name, dw := range w.dirWatchers {
+		if err := dw.Close(); err != nil {
+			log.Printf("watcher: failed to close dir watcher for %s: %v", name, err)
+		}
 	}
 }
 
@@ -388,10 +390,14 @@ func (w *ConversationWatcher) stopWatching(agentName string) {
 	}
 
 	// Clean up directory watcher
+	w.mu.Lock()
 	if dw, ok := w.dirWatchers[agentName]; ok {
-		_ = dw.Close()
+		if err := dw.Close(); err != nil {
+			log.Printf("watcher: failed to close dir watcher for %s: %v", agentName, err)
+		}
 		delete(w.dirWatchers, agentName)
 	}
+	w.mu.Unlock()
 }
 
 func (w *ConversationWatcher) watchDirectories(agentName string, dirs []string) {
@@ -405,10 +411,17 @@ func (w *ConversationWatcher) watchDirectories(agentName string, dirs []string) 
 		if err := os.MkdirAll(dir, 0755); err != nil {
 			continue
 		}
-		_ = watcher.Add(dir)
+		if err := watcher.Add(dir); err != nil {
+			log.Printf("watcher: failed to watch dir %s for %s: %v", dir, agentName, err)
+		}
 	}
 
 	w.mu.Lock()
+	if old, ok := w.dirWatchers[agentName]; ok {
+		if err := old.Close(); err != nil {
+			log.Printf("watcher: failed to close old dir watcher for %s: %v", agentName, err)
+		}
+	}
 	w.dirWatchers[agentName] = watcher
 	w.mu.Unlock()
 

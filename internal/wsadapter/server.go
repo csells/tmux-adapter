@@ -53,9 +53,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	s.mu.Lock()
 	s.clients[client] = struct{}{}
+	count := len(s.clients)
 	s.mu.Unlock()
 
-	log.Printf("client connected (%d total)", len(s.clients))
+	log.Printf("client connected (%d total)", count)
 
 	// Run read/write pumps — blocks until client disconnects
 	go client.WritePump()

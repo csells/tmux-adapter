@@ -181,7 +181,7 @@
     flex: 1;
     overflow-y: auto;
     padding: 16px;
-    scroll-behavior: smooth;
+    /* scroll-behavior set dynamically: instant for snapshots, smooth for live */
   }
 
   .placeholder {
@@ -608,8 +608,9 @@ eventsWrapEl.addEventListener('scroll', function() {
   autoScroll = (el.scrollHeight - el.scrollTop - el.clientHeight) < 50;
 });
 
-function scrollToBottom() {
+function scrollToBottom(instant) {
   if (autoScroll) {
+    eventsWrapEl.style.scrollBehavior = instant ? 'auto' : 'smooth';
     eventsWrapEl.scrollTop = eventsWrapEl.scrollHeight;
   }
 }
@@ -948,10 +949,12 @@ function renderEvents(events, isSnapshot) {
     eventsWrapEl.appendChild(info);
   }
 
-  // Render at most MAX_RENDER_EVENTS (most recent) to keep the DOM responsive
+  // Render at most MAX_RENDER_EVENTS (most recent) to keep the DOM responsive.
+  // Build in a DocumentFragment to avoid incremental reflows.
   var renderSlice = visible.length > MAX_RENDER_EVENTS ? visible.slice(visible.length - MAX_RENDER_EVENTS) : visible;
+  var frag = document.createDocumentFragment();
   renderSlice.forEach(function(e) {
-    eventsWrapEl.appendChild(createEventBlock(e));
+    frag.appendChild(createEventBlock(e));
   });
 
   if (isSnapshot && events.length > 0) {
@@ -959,11 +962,12 @@ function renderEvents(events, isSnapshot) {
     divider.className = 'snapshot-divider';
     divider.id = 'snapshot-divider';
     divider.textContent = 'live';
-    eventsWrapEl.appendChild(divider);
+    frag.appendChild(divider);
   }
 
+  eventsWrapEl.appendChild(frag);
   autoScroll = true;
-  scrollToBottom();
+  scrollToBottom(isSnapshot);
 }
 
 function reRenderEvents() {

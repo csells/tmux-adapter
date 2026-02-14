@@ -53,8 +53,10 @@ func (cm *ControlMode) ListSessions() ([]SessionInfo, error) {
 func (cm *ControlMode) ShowEnvironment(session, key string) (string, error) {
 	out, err := cm.Execute(fmt.Sprintf("show-environment -t '%s' %s", session, key))
 	if err != nil {
-		// Variable not set is not a fatal error
-		return "", nil
+		if strings.Contains(err.Error(), "unknown variable") {
+			return "", nil
+		}
+		return "", err
 	}
 
 	// Output format: KEY=value
@@ -214,7 +216,10 @@ func (cm *ControlMode) CapturePaneVisible(session string) (string, error) {
 func (cm *ControlMode) CapturePaneHistory(session string) (string, error) {
 	out, err := cm.Execute(fmt.Sprintf("capture-pane -p -e -t '%s' -S - -E -1", session))
 	if err != nil {
-		return "", nil // no history lines — not an error
+		if strings.Contains(err.Error(), "nothing to capture") {
+			return "", nil
+		}
+		return "", err
 	}
 	return out, nil
 }
@@ -331,7 +336,10 @@ func (cm *ControlMode) KillSession(session string) error {
 func (cm *ControlMode) HasSession(session string) (bool, error) {
 	_, err := cm.Execute(fmt.Sprintf("has-session -t '=%s'", session))
 	if err != nil {
-		return false, nil
+		if strings.Contains(err.Error(), "can't find session") {
+			return false, nil
+		}
+		return false, err
 	}
 	return true, nil
 }
