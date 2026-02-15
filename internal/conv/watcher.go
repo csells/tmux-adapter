@@ -1,8 +1,6 @@
 package conv
 
 import (
-	"bufio"
-	"bytes"
 	"context"
 	"log"
 	"os"
@@ -220,29 +218,21 @@ func (w *ConversationWatcher) discoverAndTail(agent agents.Agent, disc Discovere
 	}
 
 	if len(mainFiles) > 0 {
-		// Most recent file is first — it becomes the active conversation
+		// Most recent file is first — it becomes the active conversation.
+		// Only stream the current conversation file; older files are past sessions.
 		currentFile := mainFiles[0]
-
-		// Load historical events from ALL older files (oldest-first for chronological order).
-		// All events get tagged with the current file's ConversationID so the buffer is unified.
-		var history []ConversationEvent
-		for i := len(mainFiles) - 1; i >= 1; i-- {
-			events := w.loadHistoricalFile(agent, mainFiles[i], currentFile.ConversationID)
-			history = append(history, events...)
-		}
-
-		w.startConversationStream(agent, currentFile, history)
+		w.startConversationStream(agent, currentFile)
 	}
 
 	// Also start subagent streams
 	for _, f := range result.Files {
 		if f.IsSubagent {
-			w.startConversationStream(agent, f, nil)
+			w.startConversationStream(agent, f)
 		}
 	}
 }
 
-func (w *ConversationWatcher) startConversationStream(agent agents.Agent, file ConversationFile, history []ConversationEvent) {
+func (w *ConversationWatcher) startConversationStream(agent agents.Agent, file ConversationFile) {
 	factory, ok := w.parserFactory[file.Runtime]
 	if !ok {
 		return
@@ -259,14 +249,6 @@ func (w *ConversationWatcher) startConversationStream(agent agents.Agent, file C
 
 	parser := factory(agent.Name, file.ConversationID)
 	buffer := NewConversationBuffer(file.ConversationID, agent.Name, w.bufferSize)
-
-	// Pre-load historical events from older conversation files
-	for _, event := range history {
-		buffer.Append(event)
-	}
-	if len(history) > 0 {
-		log.Printf("watcher: loaded %d historical events for %s", len(history), agent.Name)
-	}
 
 	fs := &fileStream{
 		path:   file.Path,
@@ -294,6 +276,17 @@ func (w *ConversationWatcher) startConversationStream(agent agents.Agent, file C
 	if !file.IsSubagent {
 		oldConvID := w.activeByAgent[agent.Name]
 		w.activeByAgent[agent.Name] = file.ConversationID
+
+		// Clean up orphaned stream from the previous active conversation
+		if oldConvID != "" && oldConvID != file.ConversationID {
+			if oldStream, ok := w.streams[oldConvID]; ok {
+				oldStream.cancel()
+				for _, efs := range oldStream.files {
+					efs.tailer.Stop()
+				}
+				delete(w.streams, oldConvID)
+			}
+		}
 		w.mu.Unlock()
 
 		if oldConvID != "" && oldConvID != file.ConversationID {
@@ -333,38 +326,6 @@ func (w *ConversationWatcher) pumpFileStream(stream *conversationStream, fs *fil
 			})
 		}
 	}
-}
-
-// loadHistoricalFile reads an entire conversation file and parses all events.
-// Events are tagged with activeConvID so they merge cleanly into the active buffer.
-func (w *ConversationWatcher) loadHistoricalFile(agent agents.Agent, file ConversationFile, activeConvID string) []ConversationEvent {
-	factory, ok := w.parserFactory[file.Runtime]
-	if !ok {
-		return nil
-	}
-
-	data, err := os.ReadFile(file.Path)
-	if err != nil {
-		log.Printf("watcher: failed to read historical file %s: %v", file.Path, err)
-		return nil
-	}
-
-	parser := factory(agent.Name, activeConvID)
-	var events []ConversationEvent
-	scanner := bufio.NewScanner(bytes.NewReader(data))
-	scanner.Buffer(make([]byte, 2*1024*1024), 2*1024*1024)
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		if len(line) == 0 {
-			continue
-		}
-		parsed, parseErr := parser.Parse(line)
-		if parseErr != nil {
-			continue
-		}
-		events = append(events, parsed...)
-	}
-	return events
 }
 
 func (w *ConversationWatcher) stopWatching(agentName string) {

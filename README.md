@@ -287,10 +287,12 @@ JSON-only WebSocket protocol at `/ws`. Requires a protocol handshake as the firs
 1. Connects to tmux via control mode (`converter-monitor` session)
 2. Agent registry scans for gastown agents, emits lifecycle events
 3. For each agent with runtime `claude`, discovers conversation files at `~/.claude/projects/{encoded-workdir}/*.jsonl`
-4. Loads ALL historical conversation files (oldest-first), then tails the most recent for live events
+4. Streams only the **active conversation** (most recent file) per agent — older files are inactive conversations from previous sessions
 5. Parses Claude Code JSONL into normalized `ConversationEvent` structs
-6. Buffers up to 100,000 events per agent in a ring buffer
+6. Buffers up to 100,000 events per conversation in a ring buffer
 7. WebSocket clients get a snapshot (capped at 20,000 events) plus live streaming
+
+**Active vs inactive conversations**: Each agent may have many `.jsonl` files — one per CLI session. Only the most recent is the *active conversation* and is streamed live. Older files are *inactive conversations* with stable ConversationIDs (e.g., `claude:agent-name:uuid`). Future: inactive conversations can be loaded on demand as independent read-only threads.
 
 ---
 
@@ -312,7 +314,7 @@ Clients ◄──ws──► tmux-converter ◄──control mode──► tmux 
 - **Control mode**: each service maintains its own `tmux -C` connection (adapter uses `adapter-monitor`, converter uses `converter-monitor`)
 - **Agent detection**: reads `GT_ROLE`/`GT_RIG` env vars, checks `pane_current_command` against known runtimes, walks process descendants for shell-wrapped agents, handles version-as-argv[0] (e.g., Claude showing `2.1.38`)
 - **Output streaming** (adapter): `pipe-pane -o` activated per-agent on first subscriber, deactivated on last unsubscribe; each subscribe also sends an immediate `capture-pane` snapshot frame
-- **Conversation streaming** (converter): discovers `.jsonl` files, loads full history from all files, tails most recent for live events, parses into structured events, buffers and broadcasts to subscribers
+- **Conversation streaming** (converter): discovers `.jsonl` files, tails only the active (most recent) file for live events, parses into structured events, buffers and broadcasts to subscribers. Older files are inactive conversations available for future on-demand loading.
 - **Send prompt**: full NudgeSession sequence with per-agent mutex to prevent interleaving
 
 ## Adapter Flags

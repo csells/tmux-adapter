@@ -286,9 +286,10 @@ type ConversationFile struct {
 **Claude Code discovery algorithm**:
 1. Encode workDir: replace all `/` with `-` AND all `_` with `-` (preserving leading `-` for the initial `/`). Claude Code's path encoding replaces both characters.
 2. Scan `{claude-root}/projects/{encoded}/` for `*.jsonl` files
-3. Sort by mtime descending — most recent is the active conversation
-4. **Full history loading**: The watcher loads ALL conversation files per agent, not just the most recent. Older files are read oldest-first and their events are pre-loaded into the buffer before tailing begins. This gives clients the complete conversation history across session rotations.
-5. Also scan for `agent-*.jsonl` files (subagents)
+3. Sort by mtime descending — most recent is the **active conversation**
+4. **Active-only streaming**: Only the most recent (active) conversation file is tailed for live events. Older files represent **inactive conversations** from previous sessions — they are discovered but not loaded or streamed. Each inactive conversation has its own stable ConversationID (e.g., `claude:agent-name:uuid`) that can be used to load it on demand in the future.
+5. **Future: Historical conversation browsing** — The discovery layer already returns all conversation files with stable IDs. A future `subscribe-conversation` by ConversationID could load any inactive conversation as a read-only thread, enabling clients to browse past sessions independently of the active one.
+6. Also scan for `agent-*.jsonl` files (subagents)
    - **Constraint**: V1 assumes subagent files reside in the same directory as the main conversation file.
 6. For each subagent file, note `IsSubagent=true`
 7. Return `WatchDirs` = `["{claude-root}/projects/{encoded}/"]` (or the matched directory) for fsnotify on conversation rotation
@@ -522,9 +523,9 @@ type WatcherEvent struct {
    a. Look up discoverer for `agent.Runtime`; if no discoverer registered, emit `agent-added` lifecycle event with a log warning and return (see **Unknown runtime handling** below)
    b. Spawn a goroutine that calls `discoverer.FindConversations(agent.Name, agent.WorkDir)` (async — do not block the event loop)
    c. On discovery completion: separate non-subagent files from subagent files. For non-subagent files:
-      - Most recent file (first by mtime) becomes the active conversation
-      - ALL older files are read synchronously oldest-first via `loadHistoricalFile()` — each file is parsed line-by-line and events are tagged with the active conversation ID so they merge into one unified buffer
-      - Historical events are pre-loaded into the buffer before the live tailer starts
+      - Most recent file (first by mtime) becomes the **active conversation** — this is the only file that gets tailed for live events
+      - Older files are **inactive conversations** — they are discovered and have stable ConversationIDs but are not loaded into memory. They can be loaded on demand in the future via `subscribe-conversation` with their ConversationID.
+      - When re-discovery changes the active conversation (e.g., agent starts a new session), the old active stream is cleaned up: its context is cancelled, tailers are stopped, and it is removed from `w.streams`
    d. Create isolated `fileStream` for the active file (independent Tailer + Parser instance from factory)
    e. Also start fileStreams for any subagent files
    f. If no files found: register fsnotify on `DiscoveryResult.WatchDirs` and retry discovery on timer (default 5s via `--discovery-retry`)
@@ -553,8 +554,8 @@ When an agent is detected with a runtime that has no registered parser (e.g., `c
 
 **Edge cases**:
 - Agent starts before conversation file exists (agent is initializing) — retry discovery with backoff
-- Multiple conversation files for same agent (previous + current sessions) — load ALL as history oldest-first, tail only the most recent for live events
-- Agent restarts (removed then re-added quickly) — stop old tailers, start a fresh active stream; old stream remains only in grace retention until expiry
+- Multiple conversation files for same agent (previous + current sessions) — only the most recent (active) conversation is tailed; older (inactive) conversations are discoverable by ConversationID but not loaded unless explicitly requested
+- Agent restarts (removed then re-added quickly) — stop old tailers, start a fresh active stream; old stream is cleaned up immediately
 - Subagent file appears after main conversation is already being tailed — directory watcher detects new agent-*.jsonl, starts additional tailer
 
 **Acceptance criteria**:
@@ -565,7 +566,7 @@ When an agent is detected with a runtime that has no registered parser (e.g., `c
 
 ### 4.6 Conversation Buffer (`internal/conv/buffer.go`)
 
-Per-conversation event ring buffer that supports snapshot + live streaming. Keyed by conversationId (not agent name) to avoid cross-session contamination when agents rotate to new conversations. Default capacity: 100,000 events (sufficient for full conversation histories across multiple sessions).
+Per-conversation event ring buffer that supports snapshot + live streaming. Keyed by conversationId (not agent name) to avoid cross-session contamination when agents rotate to new conversations. Each conversation (active or inactive) gets its own independent buffer. Default capacity: 100,000 events per conversation.
 
 ```go
 type ConversationBuffer struct {
@@ -919,9 +920,10 @@ go build -o tmux-converter ./cmd/tmux-converter/
 
 **Deliverables** (all done):
 - `internal/conv/discovery.go` — Claude Code file discovery (path encoding: both `/` and `_` → `-`)
-- `internal/conv/watcher.go` — orchestrator: registry → discovery → full history loading → tailer → parser → buffer
-  - Loads ALL historical conversation files per agent oldest-first (not just most recent)
-  - Cleans up replaced streams on re-discovery (prevents goroutine/FD leaks)
+- `internal/conv/watcher.go` — orchestrator: registry → discovery → tailer → parser → buffer
+  - Streams only the **active conversation** (most recent file) per agent — inactive (older) conversations are not loaded
+  - Cleans up replaced streams on re-discovery (prevents goroutine/FD leaks and orphaned streams)
+  - **Future**: inactive conversations can be loaded on demand via their stable ConversationIDs
 - `internal/wsconv/server.go` — WebSocket server with protocol handshake, event filtering, snapshot cap (20k events)
 - `internal/converter/converter.go` — full wiring: ControlMode → Registry → Watcher → wsconv.Server → HTTP
 - Protocol v1 handshake, `follow-agent`, `subscribe-conversation`, `subscribe-agents`, `list-agents`, `unsubscribe-agent`
@@ -998,7 +1000,7 @@ go build -o tmux-converter ./cmd/tmux-converter/
 | Keyboard input to agents | tmux-adapter handles this; tmux-converter is read-only |
 | Terminal emulation | The entire point is to NOT need this |
 | Agent start/stop control | Out of scope; tmux-converter observes, doesn't manage |
-| Historical conversation search | Future feature; current focus is live streaming with recent history |
+| Historical conversation browsing | Future feature: discovery already returns all conversation files with stable ConversationIDs. A future `subscribe-conversation` could load any inactive conversation as a read-only, independent thread. Each past session would be its own thread — no merging across sessions. |
 | Authentication federation | Use same bearer token approach as tmux-adapter |
 | TLS termination | Use a reverse proxy (nginx, caddy) for TLS in production |
 | Database storage | In-memory buffers sufficient; persistent storage is future work |

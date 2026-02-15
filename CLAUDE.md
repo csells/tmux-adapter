@@ -90,7 +90,8 @@ cmd/tmux-converter/main.go → converter.New() → wires everything together
                 ├── internal/converter/converter.go   Startup/shutdown orchestration, HTTP mux
                 │
                 ├── internal/conv/watcher.go       ConversationWatcher: registry events → discovery → tailer → parser → buffer
-                │                                  Loads ALL historical conversation files per agent (oldest-first)
+                │                                  Streams only the active conversation (most recent file) per agent
+                │                                  Inactive conversations (older files) have stable IDs for future on-demand loading
                 ├── internal/conv/discovery.go      Claude file discovery: workdir → path encoding → .jsonl scan
                 │                                  Path encoding: both / and _ replaced with -
                 ├── internal/conv/claude.go         Claude Code JSONL parser → ConversationEvent
@@ -115,7 +116,7 @@ cmd/tmux-converter/main.go → converter.New() → wires everything together
 
 **Converter:**
 - **Agent lifecycle**: tmux `%sessions-changed` / `%unlinked-window-renamed` → Registry.scan() → diff → RegistryEvent channel → wsconv.Server broadcasts JSON to subscribers
-- **Conversation streaming**: agent detected → discovery finds `~/.claude/projects/{encoded-workdir}/*.jsonl` → loads ALL historical files oldest-first → tailer streams live events → parser normalizes to ConversationEvent → buffer stores → WebSocket broadcasts to subscribers
+- **Conversation streaming**: agent detected → discovery finds `~/.claude/projects/{encoded-workdir}/*.jsonl` → tails only the active (most recent) file → parser normalizes to ConversationEvent → buffer stores → WebSocket broadcasts to subscribers. Older files are inactive conversations with stable ConversationIDs, available for future on-demand loading as independent threads.
 - **follow-agent**: client follows agent name → auto-subscribes to current conversation → snapshot + live events → auto-switches on conversation rotation
 
 ### Binary protocol (adapter only)
