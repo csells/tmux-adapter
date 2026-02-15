@@ -15,13 +15,19 @@ type outMsg struct {
 	data []byte
 }
 
+// outputSub tracks a pipe-pane subscription by ID and channel.
+type outputSub struct {
+	id int
+	ch <-chan []byte
+}
+
 // Client represents a single WebSocket connection.
 type Client struct {
 	conn       *websocket.Conn
 	server     *Server
 	send       chan outMsg
 	agentSub   bool                     // subscribed to agent lifecycle
-	outputSubs map[string]<-chan []byte // agent name -> raw byte channel
+	outputSubs map[string]outputSub     // agent name -> subscription
 	mu         sync.Mutex
 	ctx        context.Context
 	cancel     context.CancelFunc
@@ -33,7 +39,7 @@ func NewClient(conn *websocket.Conn, server *Server, ctx context.Context, cancel
 		conn:       conn,
 		server:     server,
 		send:       make(chan outMsg, 256),
-		outputSubs: make(map[string]<-chan []byte),
+		outputSubs: make(map[string]outputSub),
 		ctx:        ctx,
 		cancel:     cancel,
 	}
@@ -131,8 +137,8 @@ func (c *Client) Close() {
 	defer c.mu.Unlock()
 
 	// Unsubscribe from all output streams
-	for session, ch := range c.outputSubs {
-		c.server.pipeMgr.Unsubscribe(session, ch)
+	for session, sub := range c.outputSubs {
+		c.server.pipeMgr.Unsubscribe(session, sub.id)
 		delete(c.outputSubs, session)
 	}
 

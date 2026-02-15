@@ -125,22 +125,6 @@ func (cm *ControlMode) SendKeysRaw(target string, keys ...string) error {
 	return err
 }
 
-// LoadBufferFromFile loads bytes into tmux's paste buffer.
-// Uses -w when available so tmux can propagate to the system clipboard.
-func (cm *ControlMode) LoadBufferFromFile(path string) error {
-	_, err := cm.Execute(fmt.Sprintf("load-buffer -w %s", shellQuote(path)))
-	if err != nil && strings.Contains(err.Error(), "unknown flag -w") {
-		_, err = cm.Execute(fmt.Sprintf("load-buffer %s", shellQuote(path)))
-	}
-	return err
-}
-
-// PasteBuffer pastes the current tmux buffer into the target pane/session.
-func (cm *ControlMode) PasteBuffer(target string) error {
-	_, err := cm.Execute(fmt.Sprintf("paste-buffer -d -t '%s'", target))
-	return err
-}
-
 // PasteBytes loads data into tmux's buffer and pastes it into the target.
 // Uses a uniquely named buffer to avoid races when multiple control-mode
 // connections share the same tmux server.

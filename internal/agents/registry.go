@@ -5,8 +5,6 @@ import (
 	"slices"
 	"strings"
 	"sync"
-
-	"github.com/gastownhall/tmux-adapter/internal/tmux"
 )
 
 // RegistryEvent represents a change in agent state.
@@ -17,7 +15,7 @@ type RegistryEvent struct {
 
 // Registry tracks live agents and emits lifecycle events.
 type Registry struct {
-	ctrl         *tmux.ControlMode
+	ctrl         ControlModeInterface
 	mu           sync.RWMutex
 	agents       map[string]Agent // name -> agent
 	events       chan RegistryEvent
@@ -28,7 +26,7 @@ type Registry struct {
 
 // NewRegistry creates a new agent registry.
 // skipSessions lists tmux session names to ignore during scanning (e.g., monitor sessions).
-func NewRegistry(ctrl *tmux.ControlMode, gtDir string, skipSessions []string) *Registry {
+func NewRegistry(ctrl ControlModeInterface, gtDir string, skipSessions []string) *Registry {
 	return &Registry{
 		ctrl:         ctrl,
 		agents:       make(map[string]Agent),
@@ -90,7 +88,10 @@ func (r *Registry) watchLoop() {
 		select {
 		case <-r.stopCh:
 			return
-		case notif := <-r.ctrl.Notifications():
+		case notif, ok := <-r.ctrl.Notifications():
+			if !ok {
+				return // notifications channel closed
+			}
 			switch notif.Type {
 			case "sessions-changed", "window-renamed":
 				// sessions-changed: session created/destroyed
@@ -193,13 +194,13 @@ func (r *Registry) scan() error {
 
 	// Diff against known agents
 	r.mu.Lock()
-	defer r.mu.Unlock()
+	var pendingEvents []RegistryEvent
 
 	// Find removed agents
 	for name, oldAgent := range r.agents {
 		if _, exists := discovered[name]; !exists {
 			delete(r.agents, name)
-			r.events <- RegistryEvent{Type: "removed", Agent: oldAgent}
+			pendingEvents = append(pendingEvents, RegistryEvent{Type: "removed", Agent: oldAgent})
 		}
 	}
 
@@ -208,11 +209,17 @@ func (r *Registry) scan() error {
 		oldAgent, existed := r.agents[name]
 		if !existed {
 			r.agents[name] = newAgent
-			r.events <- RegistryEvent{Type: "added", Agent: newAgent}
+			pendingEvents = append(pendingEvents, RegistryEvent{Type: "added", Agent: newAgent})
 		} else if oldAgent.Attached != newAgent.Attached {
 			r.agents[name] = newAgent
-			r.events <- RegistryEvent{Type: "updated", Agent: newAgent}
+			pendingEvents = append(pendingEvents, RegistryEvent{Type: "updated", Agent: newAgent})
 		}
+	}
+	r.mu.Unlock()
+
+	// Send events outside the lock to avoid deadlocking GetAgents() callers
+	for _, event := range pendingEvents {
+		r.events <- event
 	}
 
 	return nil

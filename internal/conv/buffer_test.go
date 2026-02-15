@@ -57,7 +57,7 @@ func TestBufferSubscribeNoGap(t *testing.T) {
 	buf.Append(makeEvent(EventAssistant))
 
 	// Subscribe — should get snapshot + live channel
-	snap, live := buf.Subscribe(EventFilter{})
+	snap, subID, live := buf.Subscribe(EventFilter{})
 	if len(snap) != 2 {
 		t.Fatalf("snapshot len = %d, want 2", len(snap))
 	}
@@ -77,7 +77,7 @@ func TestBufferSubscribeNoGap(t *testing.T) {
 		t.Fatal("timeout waiting for live event")
 	}
 
-	buf.Unsubscribe(live)
+	buf.Unsubscribe(subID)
 }
 
 func TestBufferSubscribeConcurrent(t *testing.T) {
@@ -86,7 +86,7 @@ func TestBufferSubscribeConcurrent(t *testing.T) {
 	const total = 100
 
 	// Subscribe first, then write concurrently
-	snap, live := buf.Subscribe(EventFilter{})
+	snap, subID, live := buf.Subscribe(EventFilter{})
 	received := len(snap)
 
 	var wg sync.WaitGroup
@@ -110,7 +110,7 @@ func TestBufferSubscribeConcurrent(t *testing.T) {
 	}
 
 	wg.Wait()
-	buf.Unsubscribe(live)
+	buf.Unsubscribe(subID)
 }
 
 func TestBufferFilterTypes(t *testing.T) {

@@ -160,6 +160,7 @@ type subscription struct {
 	id             string
 	conversationID string
 	agentName      string // non-empty for follow-agent
+	bufSubID       int    // buffer subscription ID for Unsubscribe
 	filter         conv.EventFilter
 	live           <-chan conv.ConversationEvent
 	cancel         context.CancelFunc
@@ -349,18 +350,19 @@ func (c *Client) handleSubscribeConversation(msg clientMessage) {
 	}
 
 	filter := buildFilter(msg.Filter)
-	snapshot, live := buf.Subscribe(filter)
+	snapshot, bufSubID, live := buf.Subscribe(filter)
 
 	c.mu.Lock()
 	c.nextSub++
-	subID := subID(c.nextSub)
+	sID := subID(c.nextSub)
 	sub := &subscription{
-		id:             subID,
+		id:             sID,
 		conversationID: msg.ConversationID,
+		bufSubID:       bufSubID,
 		filter:         filter,
 		live:           live,
 	}
-	c.subs[subID] = sub
+	c.subs[sID] = sub
 	c.mu.Unlock()
 
 	snapshot = capSnapshot(snapshot)
@@ -369,7 +371,7 @@ func (c *Client) handleSubscribeConversation(msg clientMessage) {
 	c.sendJSON(serverMessage{
 		ID:             msg.ID,
 		Type:           "conversation-snapshot",
-		SubscriptionID: subID,
+		SubscriptionID: sID,
 		ConversationID: msg.ConversationID,
 		Events:         snapshot,
 		Cursor:         cursor,
@@ -394,25 +396,25 @@ func (c *Client) handleFollowAgent(msg clientMessage) {
 		if existing.live != nil {
 			oldBuf := c.server.watcher.GetBuffer(existing.conversationID)
 			if oldBuf != nil {
-				oldBuf.Unsubscribe(existing.live)
+				oldBuf.Unsubscribe(existing.bufSubID)
 			}
 		}
 	}
 
 	filter := buildFilter(msg.Filter)
 	c.nextSub++
-	subID := subID(c.nextSub)
+	sID := subID(c.nextSub)
 
 	convID := c.server.watcher.GetActiveConversation(msg.Agent)
 
 	if convID == "" {
 		// No active conversation yet — register a pending follow
 		sub := &subscription{
-			id:        subID,
+			id:        sID,
 			agentName: msg.Agent,
 			filter:    filter,
 		}
-		c.subs[subID] = sub
+		c.subs[sID] = sub
 		c.follows[msg.Agent] = sub
 		c.mu.Unlock()
 
@@ -420,7 +422,7 @@ func (c *Client) handleFollowAgent(msg clientMessage) {
 			ID:             msg.ID,
 			Type:           "follow-agent",
 			OK:             boolPtr(true),
-			SubscriptionID: subID,
+			SubscriptionID: sID,
 		})
 		return
 	}
@@ -429,11 +431,11 @@ func (c *Client) handleFollowAgent(msg clientMessage) {
 	if buf == nil {
 		// Conversation ID exists but buffer doesn't yet — pending follow
 		sub := &subscription{
-			id:        subID,
+			id:        sID,
 			agentName: msg.Agent,
 			filter:    filter,
 		}
-		c.subs[subID] = sub
+		c.subs[sID] = sub
 		c.follows[msg.Agent] = sub
 		c.mu.Unlock()
 
@@ -441,22 +443,23 @@ func (c *Client) handleFollowAgent(msg clientMessage) {
 			ID:             msg.ID,
 			Type:           "follow-agent",
 			OK:             boolPtr(true),
-			SubscriptionID: subID,
+			SubscriptionID: sID,
 		})
 		return
 	}
 
-	snapshot, live := buf.Subscribe(filter)
+	snapshot, bufSubID, live := buf.Subscribe(filter)
 	subCtx, subCancel := context.WithCancel(c.ctx)
 	sub := &subscription{
-		id:             subID,
+		id:             sID,
 		conversationID: convID,
 		agentName:      msg.Agent,
+		bufSubID:       bufSubID,
 		filter:         filter,
 		live:           live,
 		cancel:         subCancel,
 	}
-	c.subs[subID] = sub
+	c.subs[sID] = sub
 	c.follows[msg.Agent] = sub
 	c.mu.Unlock()
 
@@ -467,7 +470,7 @@ func (c *Client) handleFollowAgent(msg clientMessage) {
 		ID:             msg.ID,
 		Type:           "follow-agent",
 		OK:             boolPtr(true),
-		SubscriptionID: subID,
+		SubscriptionID: sID,
 		ConversationID: convID,
 		Events:         snapshot,
 		Cursor:         cursor,
@@ -490,10 +493,10 @@ func (c *Client) handleUnsubscribe(msg clientMessage) {
 	}
 	c.mu.Unlock()
 
-	if ok {
+	if ok && sub.bufSubID != 0 {
 		buf := c.server.watcher.GetBuffer(sub.conversationID)
 		if buf != nil {
-			buf.Unsubscribe(sub.live)
+			buf.Unsubscribe(sub.bufSubID)
 		}
 	}
 
@@ -512,10 +515,10 @@ func (c *Client) handleUnsubscribeAgent(msg clientMessage) {
 	}
 	c.mu.Unlock()
 
-	if ok {
+	if ok && sub.bufSubID != 0 {
 		buf := c.server.watcher.GetBuffer(sub.conversationID)
 		if buf != nil {
-			buf.Unsubscribe(sub.live)
+			buf.Unsubscribe(sub.bufSubID)
 		}
 	}
 
@@ -589,10 +592,11 @@ func (c *Client) deliverConversationStarted(we conv.WatcherEvent) {
 		return
 	}
 
-	snapshot, live := buf.Subscribe(sub.filter)
+	snapshot, bufSubID, live := buf.Subscribe(sub.filter)
 	subCtx, subCancel := context.WithCancel(c.ctx)
 
 	sub.conversationID = we.NewConvID
+	sub.bufSubID = bufSubID
 	sub.live = live
 	sub.cancel = subCancel
 
@@ -624,9 +628,11 @@ func (c *Client) deliverConversationSwitch(we conv.WatcherEvent) {
 	}
 
 	// Unsubscribe from old buffer
-	oldBuf := c.server.watcher.GetBuffer(sub.conversationID)
-	if oldBuf != nil {
-		oldBuf.Unsubscribe(sub.live)
+	if sub.bufSubID != 0 {
+		oldBuf := c.server.watcher.GetBuffer(sub.conversationID)
+		if oldBuf != nil {
+			oldBuf.Unsubscribe(sub.bufSubID)
+		}
 	}
 	if sub.cancel != nil {
 		sub.cancel()
@@ -647,10 +653,11 @@ func (c *Client) deliverConversationSwitch(we conv.WatcherEvent) {
 		return
 	}
 
-	snapshot, live := newBuf.Subscribe(sub.filter)
+	snapshot, bufSubID, live := newBuf.Subscribe(sub.filter)
 	subCtx, subCancel := context.WithCancel(c.ctx)
 
 	sub.conversationID = we.NewConvID
+	sub.bufSubID = bufSubID
 	sub.live = live
 	sub.cancel = subCancel
 
@@ -703,9 +710,11 @@ func (c *Client) cleanup() {
 	defer c.mu.Unlock()
 
 	for _, sub := range c.subs {
-		buf := c.server.watcher.GetBuffer(sub.conversationID)
-		if buf != nil {
-			buf.Unsubscribe(sub.live)
+		if sub.bufSubID != 0 {
+			buf := c.server.watcher.GetBuffer(sub.conversationID)
+			if buf != nil {
+				buf.Unsubscribe(sub.bufSubID)
+			}
 		}
 		if sub.cancel != nil {
 			sub.cancel()

@@ -21,7 +21,8 @@ type pipeStream struct {
 	session     string
 	filePath    string
 	cancel      context.CancelFunc
-	subscribers map[chan []byte]struct{}
+	subscribers map[int]chan []byte
+	nextSubID   int
 	mu          sync.Mutex
 }
 
@@ -33,9 +34,9 @@ func NewPipePaneManager(ctrl *ControlMode) *PipePaneManager {
 	}
 }
 
-// Subscribe starts streaming output for a session and returns a channel for receiving raw bytes.
-// If this is the first subscriber, pipe-pane is activated.
-func (pm *PipePaneManager) Subscribe(session string) (<-chan []byte, error) {
+// Subscribe starts streaming output for a session and returns a subscriber ID
+// and channel for receiving raw bytes. If this is the first subscriber, pipe-pane is activated.
+func (pm *PipePaneManager) Subscribe(session string) (int, <-chan []byte, error) {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 
@@ -44,9 +45,11 @@ func (pm *PipePaneManager) Subscribe(session string) (<-chan []byte, error) {
 	stream, exists := pm.streams[session]
 	if exists {
 		stream.mu.Lock()
-		stream.subscribers[ch] = struct{}{}
+		stream.nextSubID++
+		id := stream.nextSubID
+		stream.subscribers[id] = ch
 		stream.mu.Unlock()
-		return ch, nil
+		return id, ch, nil
 	}
 
 	// First subscriber — activate pipe-pane
@@ -55,10 +58,10 @@ func (pm *PipePaneManager) Subscribe(session string) (<-chan []byte, error) {
 	// Create the file if it doesn't exist
 	f, err := os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
-		return nil, fmt.Errorf("create pipe file: %w", err)
+		return 0, nil, fmt.Errorf("create pipe file: %w", err)
 	}
 	if err := f.Close(); err != nil {
-		return nil, fmt.Errorf("close pipe file: %w", err)
+		return 0, nil, fmt.Errorf("close pipe file: %w", err)
 	}
 
 	// Activate pipe-pane
@@ -66,7 +69,7 @@ func (pm *PipePaneManager) Subscribe(session string) (<-chan []byte, error) {
 		if rmErr := os.Remove(filePath); rmErr != nil {
 			log.Printf("pipe-pane cleanup %s: %v", filePath, rmErr)
 		}
-		return nil, fmt.Errorf("activate pipe-pane: %w", err)
+		return 0, nil, fmt.Errorf("activate pipe-pane: %w", err)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -74,17 +77,18 @@ func (pm *PipePaneManager) Subscribe(session string) (<-chan []byte, error) {
 		session:     session,
 		filePath:    filePath,
 		cancel:      cancel,
-		subscribers: map[chan []byte]struct{}{ch: {}},
+		subscribers: map[int]chan []byte{1: ch},
+		nextSubID:   1,
 	}
 	pm.streams[session] = stream
 
 	go pm.tailFile(ctx, stream)
 
-	return ch, nil
+	return 1, ch, nil
 }
 
-// Unsubscribe removes a subscriber. If it was the last one, pipe-pane is deactivated.
-func (pm *PipePaneManager) Unsubscribe(session string, ch <-chan []byte) {
+// Unsubscribe removes a subscriber by ID. If it was the last one, pipe-pane is deactivated.
+func (pm *PipePaneManager) Unsubscribe(session string, id int) {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 
@@ -93,14 +97,10 @@ func (pm *PipePaneManager) Unsubscribe(session string, ch <-chan []byte) {
 		return
 	}
 
-	// Find and remove the channel
 	stream.mu.Lock()
-	for sub := range stream.subscribers {
-		if (<-chan []byte)(sub) == ch {
-			delete(stream.subscribers, sub)
-			close(sub)
-			break
-		}
+	if ch, ok := stream.subscribers[id]; ok {
+		delete(stream.subscribers, id)
+		close(ch)
 	}
 	remaining := len(stream.subscribers)
 	stream.mu.Unlock()
@@ -129,7 +129,7 @@ func (pm *PipePaneManager) stopStream(stream *pipeStream) {
 	}
 
 	stream.mu.Lock()
-	for ch := range stream.subscribers {
+	for _, ch := range stream.subscribers {
 		close(ch)
 	}
 	stream.subscribers = nil
@@ -213,7 +213,7 @@ func (pm *PipePaneManager) tailFile(ctx context.Context, stream *pipeStream) {
 			pendingMu.Unlock()
 
 			stream.mu.Lock()
-			for ch := range stream.subscribers {
+			for _, ch := range stream.subscribers {
 				select {
 				case ch <- data:
 				default:

@@ -46,7 +46,7 @@ func (a *Adapter) Start() error {
 	// 1. Connect to tmux in control mode
 	ctrl, err := tmux.NewControlMode("adapter-monitor")
 	if err != nil {
-		return fmt.Errorf("tmux control mode: %w", err)
+		return fmt.Errorf("tmux control mode (session=adapter-monitor): %w", err)
 	}
 	a.ctrl = ctrl
 	log.Println("connected to tmux control mode")
@@ -63,7 +63,7 @@ func (a *Adapter) Start() error {
 	// 5. Start registry watching
 	if err := a.registry.Start(); err != nil {
 		ctrl.Close()
-		return fmt.Errorf("start registry: %w", err)
+		return fmt.Errorf("start registry (gtDir=%s): %w", a.gtDir, err)
 	}
 	log.Printf("agent registry started (%d agents found)", len(a.registry.GetAgents()))
 

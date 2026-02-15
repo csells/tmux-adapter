@@ -1,6 +1,7 @@
 package agents
 
 import (
+	"log"
 	"os/exec"
 	"path/filepath"
 	"slices"
@@ -59,6 +60,9 @@ func IsShell(command string) bool {
 func CheckProcessBinary(pid string, processNames []string) bool {
 	out, err := exec.Command("ps", "-p", pid, "-o", "comm=").Output()
 	if err != nil {
+		if _, ok := err.(*exec.ExitError); !ok {
+			log.Printf("CheckProcessBinary(%s): unexpected error: %v", pid, err)
+		}
 		return false
 	}
 	binaryPath := strings.TrimSpace(string(out))
@@ -79,6 +83,9 @@ func checkDescendantsDepth(pid string, processNames []string, depth int) bool {
 
 	out, err := exec.Command("pgrep", "-P", pid, "-l").Output()
 	if err != nil {
+		if _, ok := err.(*exec.ExitError); !ok {
+			log.Printf("checkDescendantsDepth(%s): unexpected error: %v", pid, err)
+		}
 		return false
 	}
 

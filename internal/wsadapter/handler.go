@@ -238,19 +238,19 @@ func handleSubscribeOutput(c *Client, req Request) {
 		// Clean up any existing subscription for this agent before creating a new one.
 		// This prevents leaking the old channel and its forwarding goroutine.
 		c.mu.Lock()
-		oldCh, hadOld := c.outputSubs[req.Agent]
+		oldSub, hadOld := c.outputSubs[req.Agent]
 		if hadOld {
 			delete(c.outputSubs, req.Agent)
 		}
 		c.mu.Unlock()
 		if hadOld {
 			log.Printf("subscribe-output(%s): replacing existing subscription", req.Agent)
-			c.server.pipeMgr.Unsubscribe(req.Agent, oldCh)
+			c.server.pipeMgr.Unsubscribe(req.Agent, oldSub.id)
 		}
 
 		// Subscribe to pipe-pane first so it's ready for ongoing streaming.
 		log.Printf("subscribe-output(%s): starting pipe-pane", req.Agent)
-		ch, err := c.server.pipeMgr.Subscribe(req.Agent)
+		subID, ch, err := c.server.pipeMgr.Subscribe(req.Agent)
 		if err != nil {
 			log.Printf("subscribe-output(%s): pipe-pane error: %v", req.Agent, err)
 			okVal := false
@@ -260,7 +260,7 @@ func handleSubscribeOutput(c *Client, req Request) {
 		log.Printf("subscribe-output(%s): pipe-pane active", req.Agent)
 
 		c.mu.Lock()
-		c.outputSubs[req.Agent] = ch
+		c.outputSubs[req.Agent] = outputSub{id: subID, ch: ch}
 		c.mu.Unlock()
 
 		okVal := true
@@ -328,14 +328,14 @@ func handleUnsubscribeOutput(c *Client, req Request) {
 	}
 
 	c.mu.Lock()
-	ch, exists := c.outputSubs[req.Agent]
+	sub, exists := c.outputSubs[req.Agent]
 	if exists {
 		delete(c.outputSubs, req.Agent)
 	}
 	c.mu.Unlock()
 
 	if exists {
-		c.server.pipeMgr.Unsubscribe(req.Agent, ch)
+		c.server.pipeMgr.Unsubscribe(req.Agent, sub.id)
 	}
 
 	okVal := true

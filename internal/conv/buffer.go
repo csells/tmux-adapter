@@ -5,6 +5,12 @@ import (
 	"sync"
 )
 
+// bufferSub holds a subscriber's channel and filter.
+type bufferSub struct {
+	ch     chan ConversationEvent
+	filter EventFilter
+}
+
 // ConversationBuffer is a per-conversation event ring buffer with snapshot + live streaming.
 type ConversationBuffer struct {
 	conversationID string
@@ -13,7 +19,8 @@ type ConversationBuffer struct {
 	maxSize        int
 	nextSeq        int64
 	mu             sync.Mutex // Must be full Lock (not RLock) for gap-free snapshot+subscribe
-	subs           map[chan ConversationEvent]EventFilter
+	subs           map[int]bufferSub
+	nextSubID      int
 }
 
 // NewConversationBuffer creates a buffer for a specific conversation.
@@ -23,7 +30,7 @@ func NewConversationBuffer(conversationID, agentName string, maxSize int) *Conve
 		agentName:      agentName,
 		events:         make([]ConversationEvent, 0, 256),
 		maxSize:        maxSize,
-		subs:           make(map[chan ConversationEvent]EventFilter),
+		subs:           make(map[int]bufferSub),
 	}
 }
 
@@ -45,10 +52,10 @@ func (b *ConversationBuffer) Append(event ConversationEvent) {
 	b.events = append(b.events, event)
 
 	// Broadcast to subscribers (non-blocking)
-	for ch, filter := range b.subs {
-		if filter.Matches(event) {
+	for _, sub := range b.subs {
+		if sub.filter.Matches(event) {
 			select {
-			case ch <- event:
+			case sub.ch <- event:
 			default:
 				log.Printf("buffer %s: dropped event seq=%d type=%s to slow subscriber", b.conversationID[:min(8, len(b.conversationID))], event.Seq, event.Type)
 			}
@@ -74,30 +81,29 @@ func (b *ConversationBuffer) snapshotLocked(filter EventFilter) []ConversationEv
 	return result
 }
 
-// Subscribe returns a snapshot of current events and a live channel for new events.
+// Subscribe returns a snapshot of current events, a subscriber ID, and a live channel for new events.
 // The snapshot and channel registration are atomic — no events are missed between them.
-func (b *ConversationBuffer) Subscribe(filter EventFilter) (snapshot []ConversationEvent, live <-chan ConversationEvent) {
+func (b *ConversationBuffer) Subscribe(filter EventFilter) (snapshot []ConversationEvent, subID int, live <-chan ConversationEvent) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
 	snapshot = b.snapshotLocked(filter)
 
 	ch := make(chan ConversationEvent, 256)
-	b.subs[ch] = filter
-	return snapshot, ch
+	b.nextSubID++
+	subID = b.nextSubID
+	b.subs[subID] = bufferSub{ch: ch, filter: filter}
+	return snapshot, subID, ch
 }
 
-// Unsubscribe removes a subscriber and closes its channel.
-func (b *ConversationBuffer) Unsubscribe(ch <-chan ConversationEvent) {
+// Unsubscribe removes a subscriber by ID and closes its channel.
+func (b *ConversationBuffer) Unsubscribe(subID int) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	for sub := range b.subs {
-		if (<-chan ConversationEvent)(sub) == ch {
-			delete(b.subs, sub)
-			close(sub)
-			return
-		}
+	if sub, ok := b.subs[subID]; ok {
+		delete(b.subs, subID)
+		close(sub.ch)
 	}
 }
 
