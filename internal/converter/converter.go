@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"log"
 	"net/http"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"github.com/gastownhall/tmux-adapter/internal/conv"
 	"github.com/gastownhall/tmux-adapter/internal/tmux"
 	"github.com/gastownhall/tmux-adapter/internal/wsconv"
+	"github.com/gastownhall/tmux-adapter/web"
 )
 
 // Converter is the structured conversation streaming service.
@@ -96,6 +98,18 @@ func (c *Converter) Start() error {
 	})
 	mux.HandleFunc("/ws", c.wsSrv.HandleWebSocket)
 
+	// Serve embedded converter web component files at /tmux-converter-web/
+	converterFS, _ := fs.Sub(web.Files, "tmux-converter-web")
+	mux.Handle("/tmux-converter-web/", corsHandler(
+		http.StripPrefix("/tmux-converter-web/", http.FileServer(http.FS(converterFS))),
+	))
+
+	// Serve shared dashboard files at /shared/
+	sharedFS, _ := fs.Sub(web.Files, "shared")
+	mux.Handle("/shared/", corsHandler(
+		http.StripPrefix("/shared/", http.FileServer(http.FS(sharedFS))),
+	))
+
 	if c.debugServeDir != "" {
 		log.Printf("converter: serving static files from %s at /", c.debugServeDir)
 		mux.Handle("/", http.FileServer(http.Dir(c.debugServeDir)))
@@ -131,4 +145,12 @@ func (c *Converter) Stop() {
 	c.ctrl.Close()
 
 	log.Println("converter: shutdown complete")
+}
+
+func corsHandler(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Cache-Control", "no-store")
+		next.ServeHTTP(w, r)
+	})
 }

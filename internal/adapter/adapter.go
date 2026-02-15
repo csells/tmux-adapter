@@ -77,9 +77,15 @@ func (a *Adapter) Start() error {
 	mux.Handle("/ws", a.wsSrv)
 
 	// Serve embedded web component files at /tmux-adapter-web/
-	componentFS, _ := fs.Sub(web.ComponentFiles, "tmux-adapter-web")
+	adapterFS, _ := fs.Sub(web.Files, "tmux-adapter-web")
 	mux.Handle("/tmux-adapter-web/", corsHandler(
-		http.StripPrefix("/tmux-adapter-web/", http.FileServer(http.FS(componentFS))),
+		http.StripPrefix("/tmux-adapter-web/", http.FileServer(http.FS(adapterFS))),
+	))
+
+	// Serve shared dashboard files at /shared/
+	sharedFS, _ := fs.Sub(web.Files, "shared")
+	mux.Handle("/shared/", corsHandler(
+		http.StripPrefix("/shared/", http.FileServer(http.FS(sharedFS))),
 	))
 
 	// Debug: remote console log endpoint
