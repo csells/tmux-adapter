@@ -91,6 +91,10 @@ func (cm *ControlMode) Execute(command string) (string, error) {
 	cm.execMu.Lock()
 	defer cm.execMu.Unlock()
 
+	if cm.closing.Load() {
+		return "", fmt.Errorf("tmux control mode closing")
+	}
+
 	// Drain any stale response (shouldn't happen, but be safe)
 	select {
 	case <-cm.responseCh:
