@@ -8,25 +8,30 @@ import (
 	"strings"
 )
 
-// Agent represents a live AI coding agent running in gastown.
+// Agent represents a live AI coding agent detected in a tmux session.
 type Agent struct {
-	Name     string  `json:"name"`
-	Role     string  `json:"role"`
-	Runtime  string  `json:"runtime"`
-	Rig      *string `json:"rig"`
-	WorkDir  string  `json:"workDir"`
-	Attached bool    `json:"attached"`
+	Name     string `json:"name"`     // tmux session name
+	Runtime  string `json:"runtime"`  // detected runtime (claude, gemini, codex, etc.)
+	WorkDir  string `json:"workDir"`  // pane working directory
+	Attached bool   `json:"attached"` // session attached status
 }
 
-// runtimeProcessNames maps agent preset names to the process names they run as.
+// runtimeProcessNames maps agent runtime names to the process names they run as.
 var runtimeProcessNames = map[string][]string{
-	"claude":  {"node", "claude"},
-	"gemini":  {"gemini"},
-	"codex":   {"codex"},
-	"cursor":  {"cursor-agent"},
-	"auggie":  {"auggie"},
-	"amp":     {"amp"},
+	"claude":   {"node", "claude"},
+	"gemini":   {"gemini"},
+	"codex":    {"codex"},
+	"cursor":   {"cursor-agent"},
+	"auggie":   {"auggie"},
+	"amp":      {"amp"},
 	"opencode": {"opencode", "node", "bun"},
+}
+
+// RuntimePriority defines the order in which runtimes are checked.
+// More specific runtimes first: "claude" before "opencode" because
+// both list "node" as a process name.
+var RuntimePriority = []string{
+	"claude", "gemini", "codex", "cursor", "auggie", "amp", "opencode",
 }
 
 // knownShells is the set of process names that indicate a shell (not an agent).
@@ -35,14 +40,9 @@ var knownShells = map[string]bool{
 	"fish": true, "tcsh": true, "ksh": true,
 }
 
-// GetProcessNames returns the process names for a given agent preset.
-// Falls back to claude's names if unknown.
-func GetProcessNames(agentName string) []string {
-	if names, ok := runtimeProcessNames[agentName]; ok {
-		return names
-	}
-	return runtimeProcessNames["claude"]
-}
+// collectDescendantNamesFunc is the function used to collect descendant process
+// names. Tests can replace this to avoid calling pgrep.
+var collectDescendantNamesFunc = CollectDescendantNames
 
 // IsAgentProcess checks if a pane command matches any of the expected process names.
 func IsAgentProcess(command string, processNames []string) bool {
@@ -70,23 +70,66 @@ func CheckProcessBinary(pid string, processNames []string) bool {
 	return IsAgentProcess(binaryName, processNames)
 }
 
-// CheckDescendants walks the process tree looking for a matching process name.
-// Max depth of 10 to prevent infinite loops.
-func CheckDescendants(pid string, processNames []string) bool {
-	return checkDescendantsDepth(pid, processNames, 0)
+// DetectRuntime performs the full 3-tier agent detection across all
+// known runtimes. Returns the runtime name or "" if no agent found.
+func DetectRuntime(paneCommand, pid string) string {
+	// Tier 1: Direct pane command match
+	for _, runtime := range RuntimePriority {
+		if IsAgentProcess(paneCommand, runtimeProcessNames[runtime]) {
+			return runtime
+		}
+	}
+
+	// Tier 2: Shell wrapping -> check descendants
+	if IsShell(paneCommand) && pid != "" {
+		descendants := collectDescendantNamesFunc(pid)
+		for _, runtime := range RuntimePriority {
+			if matchesAny(descendants, runtimeProcessNames[runtime]) {
+				return runtime
+			}
+		}
+		return "" // shell with no agent descendants
+	}
+
+	// Tier 3: Unrecognized command (e.g., version-as-argv[0] like "2.1.38")
+	// Check binary path first, then descendants.
+	if pid != "" {
+		for _, runtime := range RuntimePriority {
+			if CheckProcessBinary(pid, runtimeProcessNames[runtime]) {
+				return runtime
+			}
+		}
+		descendants := collectDescendantNamesFunc(pid)
+		for _, runtime := range RuntimePriority {
+			if matchesAny(descendants, runtimeProcessNames[runtime]) {
+				return runtime
+			}
+		}
+	}
+
+	return "" // no agent found
 }
 
-func checkDescendantsDepth(pid string, processNames []string, depth int) bool {
+// CollectDescendantNames walks the process tree below pid, collecting all
+// descendant process names. Makes O(depth) pgrep -P calls (one per tree
+// level, max 10 levels).
+func CollectDescendantNames(pid string) []string {
+	var names []string
+	collectDescendantNamesDepth(pid, &names, 0)
+	return names
+}
+
+func collectDescendantNamesDepth(pid string, names *[]string, depth int) {
 	if depth >= 10 {
-		return false
+		return
 	}
 
 	out, err := exec.Command("pgrep", "-P", pid, "-l").Output()
 	if err != nil {
 		if _, ok := err.(*exec.ExitError); !ok {
-			log.Printf("checkDescendantsDepth(%s): unexpected error: %v", pid, err)
+			log.Printf("collectDescendantNamesDepth(%s): unexpected error: %v", pid, err)
 		}
-		return false
+		return
 	}
 
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
@@ -100,99 +143,17 @@ func checkDescendantsDepth(pid string, processNames []string, depth int) bool {
 		childPID := parts[0]
 		childName := parts[1]
 
-		if IsAgentProcess(childName, processNames) {
-			return true
-		}
-		if checkDescendantsDepth(childPID, processNames, depth+1) {
+		*names = append(*names, childName)
+		collectDescendantNamesDepth(childPID, names, depth+1)
+	}
+}
+
+// matchesAny checks if any name in descendants matches any name in processNames.
+func matchesAny(descendants, processNames []string) bool {
+	for _, d := range descendants {
+		if slices.Contains(processNames, d) {
 			return true
 		}
 	}
 	return false
-}
-
-// ParseSessionName extracts role and rig from a gastown session name.
-// Returns role and rig (empty string for town-level agents).
-func ParseSessionName(name string) (role string, rig string) {
-	// Town-level: hq-ROLE
-	if rest, ok := strings.CutPrefix(name, "hq-"); ok {
-		return rest, ""
-	}
-
-	// Rig-level: gt-RIG-ROLE or gt-RIG-crew-NAME or gt-RIG-NAME (polecat)
-	if rest, ok := strings.CutPrefix(name, "gt-"); ok {
-
-		// Special case: gt-boot
-		if rest == "boot" {
-			return "boot", ""
-		}
-
-		// Find the rig name — it's the first segment
-		// gt-RIGNAME-witness, gt-RIGNAME-refinery, gt-RIGNAME-crew-NAME, gt-RIGNAME-NAME
-		parts := strings.SplitN(rest, "-", 3)
-		if len(parts) < 2 {
-			return "unknown", ""
-		}
-
-		rigName := parts[0]
-		remainder := parts[1]
-
-		// Check for known rig-level roles
-		switch remainder {
-		case "witness":
-			return "witness", rigName
-		case "refinery":
-			return "refinery", rigName
-		case "overseer":
-			return "overseer", rigName
-		}
-
-		// Check for crew: gt-RIG-crew-NAME
-		if remainder == "crew" {
-			return "crew", rigName
-		}
-
-		// Anything else is a polecat: gt-RIG-NAME
-		return "polecat", rigName
-	}
-
-	// Project-scoped: PROJECT/ROLE/NAME (e.g., hello_gastown/crew/bob)
-	if strings.Contains(name, "/") {
-		parts := strings.Split(name, "/")
-		if len(parts) >= 2 {
-			return parts[len(parts)-2], parts[0]
-		}
-	}
-
-	return "unknown", ""
-}
-
-// InferRuntime tries to determine the agent runtime from the pane command or binary.
-func InferRuntime(paneCommand, pid string) string {
-	// Check direct command match
-	for runtime, names := range runtimeProcessNames {
-		if IsAgentProcess(paneCommand, names) {
-			return runtime
-		}
-	}
-
-	// Check actual binary path
-	if pid != "" {
-		out, err := exec.Command("ps", "-p", pid, "-o", "comm=").Output()
-		if err == nil {
-			binaryName := filepath.Base(strings.TrimSpace(string(out)))
-			for runtime, names := range runtimeProcessNames {
-				if IsAgentProcess(binaryName, names) {
-					return runtime
-				}
-			}
-		}
-	}
-
-	return "claude" // default
-}
-
-// IsGastownSession checks if a session name belongs to gastown.
-// Matches classic prefixes (hq-*, gt-*) and project-scoped names (project/role/name).
-func IsGastownSession(name string) bool {
-	return strings.HasPrefix(name, "hq-") || strings.HasPrefix(name, "gt-") || strings.Contains(name, "/")
 }

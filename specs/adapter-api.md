@@ -1,16 +1,16 @@
 # Tmux Adapter API Spec
 
-A WebSocket service that exposes gastown agents as a programmatic interface. Clients interact with agents — tmux is an internal implementation detail.
+A WebSocket service that exposes AI coding agents running in tmux sessions. Clients interact with agents — tmux is an internal implementation detail.
 
 ## Startup
 
 ```
-tmux-adapter [--gt-dir ~/gt] [--port 8080] [--auth-token TOKEN] [--allowed-origins "localhost:*"] [--debug-serve-dir ./samples]
+tmux-adapter [--work-dir PATH] [--port 8080] [--auth-token TOKEN] [--allowed-origins "localhost:*"] [--debug-serve-dir ./samples]
 ```
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--gt-dir` | `~/gt` | Gastown town directory — scopes which tmux sessions belong to this instance |
+| `--work-dir` | (empty) | Optional working directory filter — only track agents under this path (empty = all agents) |
 | `--port` | `8080` | HTTP/WebSocket listen port |
 | `--auth-token` | (none) | Require this token as `?token=` query param on WebSocket connections |
 | `--allowed-origins` | `localhost:*` | Comma-separated origin patterns for CORS and WebSocket origin checks |
@@ -67,27 +67,23 @@ Notes:
 
 ## Agent Model
 
-An agent represents a live AI coding agent running in gastown. Only agents with an actual running process are exposed — zombie sessions (tmux alive, agent process dead) are filtered out.
+An agent represents a live AI coding agent detected in a tmux session. Only agents with an actual running process are exposed — zombie sessions (tmux alive, agent process dead) are filtered out.
 
 ```json
 {
-  "name": "hq-mayor",
-  "role": "mayor",
+  "name": "my-project",
   "runtime": "claude",
-  "rig": null,
-  "workDir": "/Users/me/gt/mayor/rig",
+  "workDir": "/home/user/code/my-project",
   "attached": false
 }
 ```
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `name` | string | Agent identifier (e.g., `hq-mayor`, `gt-gastown-crew-max`) |
-| `role` | string | Agent role: `mayor`, `deacon`, `overseer`, `witness`, `refinery`, `crew`, `polecat` |
-| `runtime` | string | Agent runtime: `claude`, `gemini`, `codex`, `cursor`, `auggie`, `amp`, `opencode` |
-| `rig` | string? | Rig name for rig-level agents, null for town-level agents |
+| `name` | string | Agent identifier (tmux session name) |
+| `runtime` | string | Detected agent runtime: `claude`, `gemini`, `codex`, `cursor`, `auggie`, `amp`, `opencode` |
 | `workDir` | string | Working directory the agent is running in |
-| `attached` | bool | Whether a human is currently viewing this agent's session |
+| `attached` | bool | Whether a human is currently viewing this agent's tmux session |
 
 ---
 
@@ -107,9 +103,8 @@ Response:
   "id": "1",
   "type": "list-agents",
   "agents": [
-    {"name": "hq-mayor", "role": "mayor", "runtime": "claude", "rig": null, "workDir": "/Users/me/gt/mayor/rig", "attached": true},
-    {"name": "hq-deacon", "role": "deacon", "runtime": "claude", "rig": null, "workDir": "/Users/me/gt", "attached": false},
-    {"name": "gt-gastown-crew-max", "role": "crew", "runtime": "gemini", "rig": "gastown", "workDir": "/Users/me/gt/gastown/crew/max/rig", "attached": false}
+    {"name": "my-project", "runtime": "claude", "workDir": "/home/user/code/my-project", "attached": true},
+    {"name": "research", "runtime": "gemini", "workDir": "/home/user/code/research", "attached": false}
   ]
 }
 ```
@@ -119,7 +114,7 @@ Response:
 Send a prompt to an agent. Enter is implied — the client just sends the text. The adapter handles the full send sequence internally (literal mode, debounce, Escape, Enter with retry, wake).
 
 ```json
-{"id": "2", "type": "send-prompt", "agent": "hq-mayor", "prompt": "please review the PR"}
+{"id": "2", "type": "send-prompt", "agent": "my-project", "prompt": "please review the PR"}
 ```
 
 Response (after send completes):
@@ -137,7 +132,7 @@ Error:
 Start output subscription (streaming by default).
 
 ```json
-{"id": "3", "type": "subscribe-output", "agent": "hq-mayor"}
+{"id": "3", "type": "subscribe-output", "agent": "my-project"}
 ```
 
 Response:
@@ -151,7 +146,7 @@ After this response, the server sends binary `0x01` frames:
 
 To get history without subscribing, pass `"stream": false`:
 ```json
-{"id": "4", "type": "subscribe-output", "agent": "hq-mayor", "stream": false}
+{"id": "4", "type": "subscribe-output", "agent": "my-project", "stream": false}
 ```
 
 This returns the history but does not activate streaming.
@@ -161,7 +156,7 @@ This returns the history but does not activate streaming.
 Stop streaming an agent's output.
 
 ```json
-{"id": "5", "type": "unsubscribe-output", "agent": "hq-mayor"}
+{"id": "5", "type": "unsubscribe-output", "agent": "my-project"}
 ```
 
 Response:
@@ -171,7 +166,7 @@ Response:
 
 ### subscribe-agents
 
-Start receiving agent lifecycle events. The server immediately responds with the current agent list, then pushes `agent-added` / `agent-removed` events as agents come and go.
+Start receiving agent lifecycle events. The server immediately responds with the current agent list, then pushes `agent-added` / `agent-removed` / `agent-updated` events as agents come and go.
 
 ```json
 {"id": "6", "type": "subscribe-agents"}
@@ -184,13 +179,16 @@ Response (includes current state):
   "type": "subscribe-agents",
   "ok": true,
   "agents": [
-    {"name": "hq-mayor", "role": "mayor", "runtime": "claude", "rig": null, "workDir": "/Users/me/gt/mayor/rig", "attached": true},
-    {"name": "hq-deacon", "role": "deacon", "runtime": "claude", "rig": null, "workDir": "/Users/me/gt", "attached": false}
-  ]
+    {"name": "my-project", "runtime": "claude", "workDir": "/home/user/code/my-project", "attached": true},
+    {"name": "research", "runtime": "gemini", "workDir": "/home/user/code/research", "attached": false}
+  ],
+  "totalAgents": 2
 }
 ```
 
-After this response, the server pushes `agent-added` / `agent-removed` events.
+The `totalAgents` field reflects the unfiltered count across the entire registry, useful when session filters are applied.
+
+After this response, the server pushes `agent-added` / `agent-removed` / `agent-updated` events. An `agents-count` event is also sent on `agent-added` and `agent-removed` (but not `agent-updated`, since the total doesn't change).
 
 ### unsubscribe-agents
 
@@ -216,7 +214,7 @@ Pushed as JSON text frames without a request. No `id` field. Only sent after the
 A new agent has become active — a real agent process is running, not just a tmux session appearing.
 
 ```json
-{"type": "agent-added", "agent": {"name": "gt-gastown-crew-max", "role": "crew", "runtime": "gemini", "rig": "gastown", "workDir": "/Users/me/gt/gastown/crew/max/rig", "attached": false}}
+{"type": "agent-added", "agent": {"name": "research", "runtime": "gemini", "workDir": "/home/user/code/research", "attached": false}}
 ```
 
 ### agent-removed
@@ -224,15 +222,23 @@ A new agent has become active — a real agent process is running, not just a tm
 An agent has stopped or its session was destroyed.
 
 ```json
-{"type": "agent-removed", "name": "gt-gastown-crew-max"}
+{"type": "agent-removed", "name": "research"}
 ```
 
 ### agent-updated
 
-An agent's metadata has changed — typically when a human attaches to or detaches from the agent's session. Pushed to `subscribe-agents` subscribers.
+An agent's metadata has changed — typically when a human attaches to or detaches from the agent's session.
 
 ```json
-{"type": "agent-updated", "agent": {"name": "hq-mayor", "role": "mayor", "runtime": "claude", "rig": null, "workDir": "/Users/me/gt/mayor/rig", "attached": true}}
+{"type": "agent-updated", "agent": {"name": "my-project", "runtime": "claude", "workDir": "/home/user/code/my-project", "attached": true}}
+```
+
+### agents-count
+
+Sent alongside `agent-added` and `agent-removed` events (not `agent-updated`). Provides the unfiltered total agent count so filtered dashboards can display "N of M agents".
+
+```json
+{"type": "agents-count", "totalAgents": 5}
 ```
 
 Terminal output is not sent as JSON. It is sent as binary `0x01` frames (see Binary Frame Format).
@@ -271,18 +277,26 @@ Clients see agents. Internally it's all tmux.
 
 **Control mode connection:**
 - One `tmux -C attach -t "adapter-monitor"` connection at startup
-- All commands (list, send-keys, capture-pane, show-environment) go through it
+- All commands (list, send-keys, capture-pane) go through it
 - `%sessions-changed` and `%unlinked-window-renamed` events trigger re-scan for agent lifecycle
 
-**GT directory scoping:**
-- The `--gt-dir` flag determines which gastown instance to watch
-- Sessions are filtered to `hq-*`/`gt-*` prefixes
-- Agent working directories are validated against the GT directory tree
+**Work directory filtering:**
+- The optional `--work-dir` flag restricts which agents are tracked
+- When set, only agents whose working directory is an exact match or a subdirectory are included
+- Uses trailing-slash normalization to prevent prefix collisions: `/tmp/gt` matches `/tmp/gt` and `/tmp/gt/work` but not `/tmp/gt-other`
+- When empty (the default), all detected agents are tracked regardless of working directory
 
-**Agent detection:**
-- On `%sessions-changed` or `%unlinked-window-renamed`: list sessions, read `GT_AGENT`/`GT_ROLE`/`GT_RIG` env vars, verify agent process is alive (not zombie)
-- Diff against known set → push `agent-added` / `agent-removed` / `agent-updated` to subscribed clients
-- Hot-reload handling: when an agent hot-reloads (same session, process dies + restarts), emit `agent-removed` then `agent-added` with the same name in quick succession. No new event type needed.
+**Agent detection (3-tier process-based):**
+
+Detection runs on every `%sessions-changed` or `%unlinked-window-renamed` notification. For each tmux session, the adapter performs a 3-tier detection sequence:
+
+1. **Tier 1 — Direct pane command match:** The pane's running command is compared against known process names for each runtime (e.g., `node`/`claude` for Claude Code, `gemini` for Gemini CLI, `codex` for Codex). Priority ordering ensures `node` resolves to `claude` before `opencode` (both list `node`).
+
+2. **Tier 2 — Shell wrapping:** If the pane command is a known shell (`bash`, `zsh`, `sh`, `fish`, `tcsh`, `ksh`), the adapter walks the descendant process tree (via `pgrep -P`) looking for agent process names. This catches agents launched inside shells.
+
+3. **Tier 3 — Unrecognized command:** For unknown pane commands (e.g., Claude Code's version-as-argv[0] like `"2.1.38"`), the adapter checks the actual binary path via `ps -o comm=`, then falls back to descendant tree walking.
+
+The result is diffed against the known agent set to produce `agent-added`, `agent-removed`, and `agent-updated` events pushed to subscribed clients.
 
 **Atomic history + subscribe:**
 - Activate `pipe-pane -o` for streaming

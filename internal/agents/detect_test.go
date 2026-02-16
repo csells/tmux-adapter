@@ -2,73 +2,6 @@ package agents
 
 import "testing"
 
-func TestParseSessionName(t *testing.T) {
-	tests := []struct {
-		name     string
-		wantRole string
-		wantRig  string
-	}{
-		// Town-level (hq-*)
-		{"hq-witness", "witness", ""},
-		{"hq-overseer", "overseer", ""},
-
-		// Rig-level known roles
-		{"gt-myrig-witness", "witness", "myrig"},
-		{"gt-myrig-refinery", "refinery", "myrig"},
-		{"gt-myrig-overseer", "overseer", "myrig"},
-
-		// Rig-level crew
-		{"gt-myrig-crew", "crew", "myrig"},
-
-		// Rig-level polecat (unknown role falls through to polecat)
-		{"gt-myrig-bob", "polecat", "myrig"},
-
-		// Boot
-		{"gt-boot", "boot", ""},
-
-		// Short gt prefix — only one part after split
-		{"gt-x", "unknown", ""},
-
-		// Project-scoped: PROJECT/ROLE/NAME
-		{"hello_gastown/crew/bob", "crew", "hello_gastown"},
-
-		// Unknown session name
-		{"random-session", "unknown", ""},
-	}
-
-	for _, tt := range tests {
-		role, rig := ParseSessionName(tt.name)
-		if role != tt.wantRole || rig != tt.wantRig {
-			t.Fatalf("ParseSessionName(%q) = (%q, %q), want (%q, %q)",
-				tt.name, role, rig, tt.wantRole, tt.wantRig)
-		}
-	}
-}
-
-func TestGetProcessNames(t *testing.T) {
-	tests := []struct {
-		agent string
-		want  []string
-	}{
-		{"claude", []string{"node", "claude"}},
-		{"gemini", []string{"gemini"}},
-		{"unknown-agent", []string{"node", "claude"}},
-		{"", []string{"node", "claude"}},
-	}
-
-	for _, tt := range tests {
-		got := GetProcessNames(tt.agent)
-		if len(got) != len(tt.want) {
-			t.Fatalf("GetProcessNames(%q) = %v, want %v", tt.agent, got, tt.want)
-		}
-		for i := range got {
-			if got[i] != tt.want[i] {
-				t.Fatalf("GetProcessNames(%q) = %v, want %v", tt.agent, got, tt.want)
-			}
-		}
-	}
-}
-
 func TestIsAgentProcess(t *testing.T) {
 	tests := []struct {
 		command string
@@ -114,22 +47,147 @@ func TestIsShell(t *testing.T) {
 	}
 }
 
-func TestIsGastownSession(t *testing.T) {
+func TestDetectRuntime_Tier1_DirectMatch(t *testing.T) {
 	tests := []struct {
-		name string
-		want bool
+		command string
+		want    string
 	}{
-		{"hq-witness", true},
-		{"gt-myrig-crew", true},
-		{"project/role/name", true},
-		{"random", false},
-		{"", false},
+		{"claude", "claude"},
+		{"node", "claude"},
+		{"gemini", "gemini"},
+		{"codex", "codex"},
+		{"cursor-agent", "cursor"},
+		{"auggie", "auggie"},
+		{"amp", "amp"},
+		{"opencode", "opencode"},
+		{"bun", "opencode"},
 	}
 
 	for _, tt := range tests {
-		got := IsGastownSession(tt.name)
+		got := DetectRuntime(tt.command, "")
 		if got != tt.want {
-			t.Fatalf("IsGastownSession(%q) = %v, want %v", tt.name, got, tt.want)
+			t.Fatalf("DetectRuntime(%q, \"\") = %q, want %q",
+				tt.command, got, tt.want)
 		}
+	}
+}
+
+func TestDetectRuntime_NonAgent(t *testing.T) {
+	tests := []struct {
+		command string
+	}{
+		{"python"},
+		{"vim"},
+		{"htop"},
+		{""},
+	}
+
+	for _, tt := range tests {
+		got := DetectRuntime(tt.command, "")
+		if got != "" {
+			t.Fatalf("DetectRuntime(%q, \"\") = %q, want \"\"",
+				tt.command, got)
+		}
+	}
+}
+
+func TestDetectRuntime_ShellWithoutPID(t *testing.T) {
+	got := DetectRuntime("bash", "")
+	if got != "" {
+		t.Fatalf("DetectRuntime(\"bash\", \"\") = %q, want \"\"", got)
+	}
+}
+
+func TestDetectRuntime_Priority(t *testing.T) {
+	// "node" resolves to "claude" not "opencode" due to priority ordering
+	got := DetectRuntime("node", "")
+	if got != "claude" {
+		t.Fatalf("DetectRuntime(\"node\", \"\") = %q, want \"claude\" (priority)", got)
+	}
+}
+
+func TestMatchesAny(t *testing.T) {
+	tests := []struct {
+		descendants  []string
+		processNames []string
+		want         bool
+	}{
+		{[]string{"node", "python"}, []string{"node", "claude"}, true},
+		{[]string{"python", "vim"}, []string{"node", "claude"}, false},
+		{[]string{}, []string{"node", "claude"}, false},
+		{[]string{"node"}, []string{}, false},
+	}
+
+	for _, tt := range tests {
+		got := matchesAny(tt.descendants, tt.processNames)
+		if got != tt.want {
+			t.Fatalf("matchesAny(%v, %v) = %v, want %v",
+				tt.descendants, tt.processNames, got, tt.want)
+		}
+	}
+}
+
+func TestRuntimePriority_CoversAllRuntimes(t *testing.T) {
+	for runtime := range runtimeProcessNames {
+		found := false
+		for _, p := range RuntimePriority {
+			if p == runtime {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("runtime %q is in runtimeProcessNames but not in RuntimePriority", runtime)
+		}
+	}
+
+	for _, p := range RuntimePriority {
+		if _, ok := runtimeProcessNames[p]; !ok {
+			t.Fatalf("runtime %q is in RuntimePriority but not in runtimeProcessNames", p)
+		}
+	}
+}
+
+func TestDetectRuntime_Tier2_ShellWrappedClaude(t *testing.T) {
+	old := collectDescendantNamesFunc
+	collectDescendantNamesFunc = func(pid string) []string { return []string{"node"} }
+	defer func() { collectDescendantNamesFunc = old }()
+
+	got := DetectRuntime("bash", "12345")
+	if got != "claude" {
+		t.Fatalf("DetectRuntime(\"bash\", \"12345\") = %q, want \"claude\"", got)
+	}
+}
+
+func TestDetectRuntime_Tier2_ShellWrappedGemini(t *testing.T) {
+	old := collectDescendantNamesFunc
+	collectDescendantNamesFunc = func(pid string) []string { return []string{"gemini"} }
+	defer func() { collectDescendantNamesFunc = old }()
+
+	got := DetectRuntime("bash", "12345")
+	if got != "gemini" {
+		t.Fatalf("DetectRuntime(\"bash\", \"12345\") = %q, want \"gemini\"", got)
+	}
+}
+
+func TestDetectRuntime_Tier3_UnknownWithAgentDescendant(t *testing.T) {
+	old := collectDescendantNamesFunc
+	collectDescendantNamesFunc = func(pid string) []string { return []string{"claude"} }
+	defer func() { collectDescendantNamesFunc = old }()
+
+	got := DetectRuntime("2.1.38", "12345")
+	if got != "claude" {
+		t.Fatalf("DetectRuntime(\"2.1.38\", \"12345\") = %q, want \"claude\"", got)
+	}
+}
+
+func TestDetectRuntime_Tier2_ShellNoAgentDescendants(t *testing.T) {
+	old := collectDescendantNamesFunc
+	collectDescendantNamesFunc = func(pid string) []string { return []string{"python", "vim"} }
+	defer func() { collectDescendantNamesFunc = old }()
+
+	got := DetectRuntime("bash", "12345")
+	if got != "" {
+		t.Fatalf("DetectRuntime(\"bash\", \"12345\") = %q, want \"\"", got)
 	}
 }

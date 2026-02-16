@@ -4,34 +4,39 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/gastownhall/tmux-adapter/internal/agentio"
 	"github.com/gastownhall/tmux-adapter/internal/agents"
+	"github.com/gastownhall/tmux-adapter/internal/wsbase"
 )
 
 // Request is a message from a WebSocket client.
 type Request struct {
-	ID     string `json:"id"`
-	Type   string `json:"type"`
-	Agent  string `json:"agent,omitempty"`
-	Prompt string `json:"prompt,omitempty"`
-	Stream *bool  `json:"stream,omitempty"`
+	ID                   string `json:"id"`
+	Type                 string `json:"type"`
+	Agent                string `json:"agent,omitempty"`
+	Prompt               string `json:"prompt,omitempty"`
+	Stream               *bool  `json:"stream,omitempty"`
+	IncludeSessionFilter string `json:"includeSessionFilter,omitempty"`
+	ExcludeSessionFilter string `json:"excludeSessionFilter,omitempty"`
 }
 
 // Response is a message sent to a WebSocket client.
 type Response struct {
-	ID      string         `json:"id,omitempty"`
-	Type    string         `json:"type"`
-	OK      *bool          `json:"ok,omitempty"`
-	Error   string         `json:"error,omitempty"`
-	Agents  []agents.Agent `json:"agents,omitempty"`
-	History string         `json:"history,omitempty"`
-	Agent   *agents.Agent  `json:"agent,omitempty"`
-	Name    string         `json:"name,omitempty"`
-	Data    string         `json:"data,omitempty"`
+	ID          string         `json:"id,omitempty"`
+	Type        string         `json:"type"`
+	OK          *bool          `json:"ok,omitempty"`
+	Error       string         `json:"error,omitempty"`
+	Agents      []agents.Agent `json:"agents,omitempty"`
+	TotalAgents *int           `json:"totalAgents,omitempty"`
+	History     string         `json:"history,omitempty"`
+	Agent       *agents.Agent  `json:"agent,omitempty"`
+	Name        string         `json:"name,omitempty"`
+	Data        string         `json:"data,omitempty"`
 }
 
 // handleMessage routes a text request to the appropriate handler.
@@ -176,7 +181,18 @@ func tmuxKeyNameFromVT(payload []byte) (string, bool) {
 }
 
 func handleListAgents(c *Client, req Request) {
+	// Ephemeral filter — does NOT update stored broadcast filter
+	include, exclude, err := wsbase.CompileSessionFilters(req.IncludeSessionFilter, req.ExcludeSessionFilter)
+	if err != nil {
+		ok := false
+		c.sendJSON(Response{ID: req.ID, Type: "list-agents", OK: &ok, Error: err.Error()})
+		return
+	}
+
 	agentList := c.server.registry.GetAgents()
+	if include != nil || exclude != nil {
+		agentList = filterAgents(agentList, include, exclude)
+	}
 	c.sendJSON(Response{
 		ID:     req.ID,
 		Type:   "list-agents",
@@ -310,7 +326,12 @@ func handleSubscribeOutput(c *Client, req Request) {
 		}()
 	} else {
 		// Non-streaming: return full capture in JSON
-		fullHistory, _ := c.server.ctrl.CapturePaneAll(req.Agent)
+		fullHistory, err := c.server.ctrl.CapturePaneAll(req.Agent)
+		if err != nil {
+			okVal := false
+			c.sendJSON(Response{ID: req.ID, Type: "subscribe-output", OK: &okVal, Error: fmt.Sprintf("capture failed: %v", err)})
+			return
+		}
 		okVal := true
 		c.sendJSON(Response{
 			ID:      req.ID,
@@ -343,17 +364,30 @@ func handleUnsubscribeOutput(c *Client, req Request) {
 }
 
 func handleSubscribeAgents(c *Client, req Request) {
+	// Persistent filter — stored on client, applied to all future broadcasts
+	include, exclude, err := wsbase.CompileSessionFilters(req.IncludeSessionFilter, req.ExcludeSessionFilter)
+	if err != nil {
+		ok := false
+		c.sendJSON(Response{ID: req.ID, Type: "subscribe-agents", OK: &ok, Error: err.Error()})
+		return
+	}
+
 	c.mu.Lock()
 	c.agentSub = true
+	c.includeSessionFilter = include
+	c.excludeSessionFilter = exclude
 	c.mu.Unlock()
 
-	agentList := c.server.registry.GetAgents()
+	allAgents := c.server.registry.GetAgents()
+	filtered := filterAgents(allAgents, include, exclude)
+	total := c.server.registry.Count()
 	okVal := true
 	c.sendJSON(Response{
-		ID:     req.ID,
-		Type:   "subscribe-agents",
-		OK:     &okVal,
-		Agents: agentList,
+		ID:          req.ID,
+		Type:        "subscribe-agents",
+		OK:          &okVal,
+		Agents:      filtered,
+		TotalAgents: &total,
 	})
 }
 
@@ -367,7 +401,7 @@ func handleUnsubscribeAgents(c *Client, req Request) {
 }
 
 // MakeAgentEvent creates a JSON event message for agent lifecycle changes.
-func MakeAgentEvent(eventType string, agent agents.Agent) []byte {
+func MakeAgentEvent(eventType string, agent agents.Agent) ([]byte, error) {
 	var resp Response
 	switch eventType {
 	case "added":
@@ -377,6 +411,23 @@ func MakeAgentEvent(eventType string, agent agents.Agent) []byte {
 	case "updated":
 		resp = Response{Type: "agent-updated", Agent: &agent}
 	}
-	data, _ := json.Marshal(resp)
-	return data
+	data, err := json.Marshal(resp)
+	if err != nil {
+		return nil, fmt.Errorf("marshal agent event: %w", err)
+	}
+	return data, nil
+}
+
+// filterAgents returns only agents whose names pass the session filter.
+func filterAgents(all []agents.Agent, include, exclude *regexp.Regexp) []agents.Agent {
+	if include == nil && exclude == nil {
+		return all
+	}
+	result := make([]agents.Agent, 0, len(all))
+	for _, a := range all {
+		if wsbase.PassesFilter(a.Name, include, exclude) {
+			result = append(result, a)
+		}
+	}
+	return result
 }

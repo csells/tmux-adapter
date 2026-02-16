@@ -7,6 +7,5 @@ import "github.com/gastownhall/tmux-adapter/internal/tmux"
 type ControlModeInterface interface {
 	ListSessions() ([]tmux.SessionInfo, error)
 	GetPaneInfo(session string) (tmux.PaneInfo, error)
-	ShowEnvironment(session, key string) (string, error)
 	Notifications() <-chan tmux.Notification
 }

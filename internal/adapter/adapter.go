@@ -12,6 +12,7 @@ import (
 	"github.com/gastownhall/tmux-adapter/internal/agents"
 	"github.com/gastownhall/tmux-adapter/internal/tmux"
 	"github.com/gastownhall/tmux-adapter/internal/wsadapter"
+	"github.com/gastownhall/tmux-adapter/internal/wsbase"
 	"github.com/gastownhall/tmux-adapter/web"
 )
 
@@ -23,7 +24,7 @@ type Adapter struct {
 	pipeMgr        *tmux.PipePaneManager
 	wsSrv          *wsadapter.Server
 	httpSrv        *http.Server
-	gtDir          string
+	workDirFilter  string
 	port           int
 	authToken      string
 	originPatterns []string
@@ -31,9 +32,9 @@ type Adapter struct {
 }
 
 // New creates a new Adapter.
-func New(gtDir string, port int, authToken string, originPatterns []string, debugServeDir string) *Adapter {
+func New(workDirFilter string, port int, authToken string, originPatterns []string, debugServeDir string) *Adapter {
 	return &Adapter{
-		gtDir:          gtDir,
+		workDirFilter:  workDirFilter,
 		port:           port,
 		authToken:      authToken,
 		originPatterns: originPatterns,
@@ -52,7 +53,7 @@ func (a *Adapter) Start() error {
 	log.Println("connected to tmux control mode")
 
 	// 2. Create agent registry
-	a.registry = agents.NewRegistry(ctrl, a.gtDir, []string{"adapter-monitor"})
+	a.registry = agents.NewRegistry(ctrl, a.workDirFilter, []string{"adapter-monitor"})
 
 	// 3. Create pipe-pane manager
 	a.pipeMgr = tmux.NewPipePaneManager(ctrl)
@@ -63,7 +64,7 @@ func (a *Adapter) Start() error {
 	// 5. Start registry watching
 	if err := a.registry.Start(); err != nil {
 		ctrl.Close()
-		return fmt.Errorf("start registry (gtDir=%s): %w", a.gtDir, err)
+		return fmt.Errorf("start registry: %w", err)
 	}
 	log.Printf("agent registry started (%d agents found)", len(a.registry.GetAgents()))
 
@@ -77,14 +78,20 @@ func (a *Adapter) Start() error {
 	mux.Handle("/ws", a.wsSrv)
 
 	// Serve embedded web component files at /tmux-adapter-web/
-	adapterFS, _ := fs.Sub(web.Files, "tmux-adapter-web")
-	mux.Handle("/tmux-adapter-web/", corsHandler(
+	adapterFS, err := fs.Sub(web.Files, "tmux-adapter-web")
+	if err != nil {
+		return fmt.Errorf("embedded adapter assets: %w", err)
+	}
+	mux.Handle("/tmux-adapter-web/", wsbase.CorsHandler(
 		http.StripPrefix("/tmux-adapter-web/", http.FileServer(http.FS(adapterFS))),
 	))
 
 	// Serve shared dashboard files at /shared/
-	sharedFS, _ := fs.Sub(web.Files, "shared")
-	mux.Handle("/shared/", corsHandler(
+	sharedFS, err := fs.Sub(web.Files, "shared")
+	if err != nil {
+		return fmt.Errorf("embedded shared assets: %w", err)
+	}
+	mux.Handle("/shared/", wsbase.CorsHandler(
 		http.StripPrefix("/shared/", http.FileServer(http.FS(sharedFS))),
 	))
 
@@ -118,13 +125,23 @@ func (a *Adapter) Start() error {
 		Handler: mux,
 	}
 
+	errCh := make(chan error, 1)
 	go func() {
 		log.Printf("WebSocket server listening on ws://localhost:%d/ws", a.port)
-		log.Printf("watching gastown at %s", a.gtDir)
+		if a.workDirFilter != "" {
+			log.Printf("work-dir filter: %s", a.workDirFilter)
+		}
 		if err := a.httpSrv.ListenAndServe(); err != http.ErrServerClosed {
-			log.Fatalf("http server: %v", err)
+			errCh <- fmt.Errorf("http server: %w", err)
 		}
 	}()
+
+	// Give the server a moment to fail on port binding, etc.
+	select {
+	case err := <-errCh:
+		return err
+	case <-time.After(50 * time.Millisecond):
+	}
 
 	return nil
 }
@@ -159,8 +176,12 @@ func (a *Adapter) Stop() {
 // subscribed WebSocket clients.
 func (a *Adapter) forwardEvents() {
 	for event := range a.registry.Events() {
-		msg := wsadapter.MakeAgentEvent(event.Type, event.Agent)
-		a.wsSrv.BroadcastToAgentSubscribers(msg)
+		msg, err := wsadapter.MakeAgentEvent(event.Type, event.Agent)
+		if err != nil {
+			log.Printf("adapter: failed to make agent event (%s/%s): %v", event.Type, event.Agent.Name, err)
+			continue
+		}
+		a.wsSrv.BroadcastToAgentSubscribers(event.Agent.Name, event.Type, msg)
 	}
 }
 
@@ -184,14 +205,6 @@ func (a *Adapter) handleReady(w http.ResponseWriter, _ *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
-}
-
-func corsHandler(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Cache-Control", "no-store")
-		next.ServeHTTP(w, r)
-	})
 }
 
 func writeJSON(w http.ResponseWriter, status int, payload map[string]any) {

@@ -2,6 +2,7 @@ package conv
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"os"
 	"strings"
@@ -35,6 +36,13 @@ type conversationStream struct {
 	cancel         context.CancelFunc
 }
 
+// tailingState tracks the ref-counted tailing state for a single agent.
+type tailingState struct {
+	refCount   int
+	cancelFunc context.CancelFunc
+	graceTimer *time.Timer
+}
+
 // ConversationWatcher orchestrates discovery, tailing, and parsing for all active agents.
 type ConversationWatcher struct {
 	registry      *agents.Registry
@@ -50,6 +58,12 @@ type ConversationWatcher struct {
 
 	// Directory watchers for conversation rotation
 	dirWatchers map[string]*fsnotify.Watcher // agent name → directory watcher
+
+	// Lazy tailing: ref-counted per-agent tailing state
+	tailing     map[string]*tailingState // agentName → tailing state
+	tailingMu   sync.Mutex
+	convToAgent map[string]string       // conversationID → agentName
+	knownAgents map[string]agents.Agent // agentName → agent info (from registry events)
 }
 
 // NewConversationWatcher creates a new watcher.
@@ -69,6 +83,9 @@ func NewConversationWatcher(registry *agents.Registry, bufferSize int) *Conversa
 		ctx:           ctx,
 		cancel:        cancel,
 		dirWatchers:   make(map[string]*fsnotify.Watcher),
+		tailing:       make(map[string]*tailingState),
+		convToAgent:   make(map[string]string),
+		knownAgents:   make(map[string]agents.Agent),
 	}
 }
 
@@ -76,6 +93,12 @@ func NewConversationWatcher(registry *agents.Registry, bufferSize int) *Conversa
 func (w *ConversationWatcher) RegisterRuntime(runtime string, disc Discoverer, factory func(agentName, convID string) Parser) {
 	w.discoverers[runtime] = disc
 	w.parserFactory[runtime] = factory
+}
+
+// HasDiscoverer returns true if a discoverer is registered for the given runtime.
+func (w *ConversationWatcher) HasDiscoverer(runtime string) bool {
+	_, ok := w.discoverers[runtime]
+	return ok
 }
 
 // Events returns the channel for receiving watcher events.
@@ -98,6 +121,14 @@ func (w *ConversationWatcher) GetActiveConversation(agentName string) string {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
 	return w.activeByAgent[agentName]
+}
+
+// GetAgentForConversation returns the agent name for a conversation ID,
+// or "" if the mapping is not known.
+func (w *ConversationWatcher) GetAgentForConversation(convID string) string {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return w.convToAgent[convID]
 }
 
 // ListAgents returns all agents from the registry.
@@ -127,12 +158,81 @@ type ConversationInfo struct {
 	Runtime        string `json:"runtime"`
 }
 
-// Start begins watching for agent changes and starts tailing conversations.
+// EnsureTailing starts tailing for an agent if not already active.
+// Increments the reference count. Returns error if the agent is not in the registry.
+func (w *ConversationWatcher) EnsureTailing(agentName string) error {
+	w.tailingMu.Lock()
+
+	if state, ok := w.tailing[agentName]; ok {
+		if state.graceTimer != nil {
+			state.graceTimer.Stop()
+			state.graceTimer = nil
+		}
+		state.refCount++
+		w.tailingMu.Unlock()
+		return nil
+	}
+
+	// Agent must be known in the registry
+	agent, ok := w.registry.GetAgent(agentName)
+	if !ok {
+		w.tailingMu.Unlock()
+		return fmt.Errorf("agent %q not found", agentName)
+	}
+
+	ctx, cancelFn := context.WithCancel(w.ctx)
+	state := &tailingState{
+		refCount:   1,
+		cancelFunc: cancelFn,
+	}
+	w.tailing[agentName] = state
+	w.tailingMu.Unlock()
+
+	// Start discovery and tailing in background.
+	// discoverAndTail propagates this per-agent ctx to startConversationStream
+	// and retryDiscovery, so cancelling tailing cancels all streams for this agent.
+	go w.discoverAndTail(ctx, agent)
+	return nil
+}
+
+// ReleaseTailing decrements the reference count for an agent.
+// If count reaches 0, stops tailing after a 30-second grace period.
+func (w *ConversationWatcher) ReleaseTailing(agentName string) {
+	w.tailingMu.Lock()
+	state := w.tailing[agentName]
+	if state == nil {
+		w.tailingMu.Unlock()
+		return
+	}
+
+	state.refCount--
+	if state.refCount <= 0 {
+		state.graceTimer = time.AfterFunc(30*time.Second, func() {
+			w.tailingMu.Lock()
+			// Re-check refCount: this is the critical safety check.
+			// time.Timer.Stop() in EnsureTailing is best-effort; this
+			// re-check is the actual correctness guarantee.
+			if state.refCount > 0 {
+				w.tailingMu.Unlock()
+				return
+			}
+			state.cancelFunc()
+			delete(w.tailing, agentName)
+			w.tailingMu.Unlock()
+			// Clean up streams OUTSIDE tailingMu to respect lock ordering:
+			// watcher.mu → tailingMu (never reverse).
+			w.cleanupAgent(agentName)
+		})
+	}
+	w.tailingMu.Unlock()
+}
+
+// Start begins watching for agent changes. Agents are recorded but NOT
+// eagerly tailed — tailing starts on demand via EnsureTailing.
 func (w *ConversationWatcher) Start() {
-	// Process initial agents
 	for _, agent := range w.registry.GetAgents() {
+		w.recordAgent(agent)
 		w.emitEvent(WatcherEvent{Type: "agent-added", Agent: &agent})
-		w.startWatching(agent)
 	}
 
 	go w.watchLoop()
@@ -143,8 +243,6 @@ func (w *ConversationWatcher) Stop() {
 	w.cancel()
 
 	w.mu.Lock()
-	defer w.mu.Unlock()
-
 	for _, s := range w.streams {
 		s.cancel()
 		for _, fs := range s.files {
@@ -156,6 +254,18 @@ func (w *ConversationWatcher) Stop() {
 			log.Printf("watcher: failed to close dir watcher for %s: %v", name, err)
 		}
 	}
+	w.mu.Unlock()
+
+	// Clean up tailing state: stop all grace timers and cancel all per-agent contexts
+	w.tailingMu.Lock()
+	for _, state := range w.tailing {
+		if state.graceTimer != nil {
+			state.graceTimer.Stop()
+		}
+		state.cancelFunc()
+	}
+	w.tailing = make(map[string]*tailingState)
+	w.tailingMu.Unlock()
 }
 
 func (w *ConversationWatcher) watchLoop() {
@@ -169,42 +279,106 @@ func (w *ConversationWatcher) watchLoop() {
 			}
 			switch event.Type {
 			case "added":
+				w.recordAgent(event.Agent)
 				w.emitEvent(WatcherEvent{Type: "agent-added", Agent: &event.Agent})
-				w.startWatching(event.Agent)
 			case "removed":
-				w.stopWatching(event.Agent.Name)
+				w.cleanupAgent(event.Agent.Name)
+				w.cancelTailing(event.Agent.Name)
+				w.mu.Lock()
+				delete(w.knownAgents, event.Agent.Name)
+				w.mu.Unlock()
 				w.emitEvent(WatcherEvent{Type: "agent-removed", Agent: &event.Agent})
 			case "updated":
+				w.recordAgent(event.Agent)
 				w.emitEvent(WatcherEvent{Type: "agent-updated", Agent: &event.Agent})
 			}
 		}
 	}
 }
 
-func (w *ConversationWatcher) startWatching(agent agents.Agent) {
+// recordAgent stores agent info for bookkeeping. Does NOT start tailing.
+func (w *ConversationWatcher) recordAgent(agent agents.Agent) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.knownAgents[agent.Name] = agent
+}
+
+// cleanupAgent stops ALL conversation streams and directory watchers for an agent.
+// This iterates all streams (not just the active one), fixing the pre-existing
+// subagent stream leak where only activeByAgent was checked.
+func (w *ConversationWatcher) cleanupAgent(agentName string) {
+	w.mu.Lock()
+
+	// Find all streams belonging to this agent (including subagent streams)
+	var toClean []*conversationStream
+	var convIDs []string
+	for convID, s := range w.streams {
+		if s.agent.Name == agentName {
+			toClean = append(toClean, s)
+			convIDs = append(convIDs, convID)
+		}
+	}
+
+	for _, convID := range convIDs {
+		delete(w.streams, convID)
+		delete(w.convToAgent, convID)
+	}
+	delete(w.activeByAgent, agentName)
+
+	// Clean up directory watcher
+	if dw, ok := w.dirWatchers[agentName]; ok {
+		if err := dw.Close(); err != nil {
+			log.Printf("watcher: failed to close dir watcher for %s: %v", agentName, err)
+		}
+		delete(w.dirWatchers, agentName)
+	}
+	w.mu.Unlock()
+
+	// Stop streams outside the lock
+	for _, s := range toClean {
+		s.cancel()
+		for _, fs := range s.files {
+			fs.tailer.Stop()
+		}
+	}
+}
+
+// cancelTailing clears tailing state for an agent regardless of refCount.
+// Used when an agent is removed from the registry.
+func (w *ConversationWatcher) cancelTailing(agentName string) {
+	w.tailingMu.Lock()
+	state := w.tailing[agentName]
+	if state == nil {
+		w.tailingMu.Unlock()
+		return
+	}
+	if state.graceTimer != nil {
+		state.graceTimer.Stop()
+	}
+	state.cancelFunc()
+	delete(w.tailing, agentName)
+	w.tailingMu.Unlock()
+}
+
+func (w *ConversationWatcher) discoverAndTail(ctx context.Context, agent agents.Agent) {
 	disc, ok := w.discoverers[agent.Runtime]
 	if !ok {
 		log.Printf("watcher: no conversation parser for runtime %q, agent %q — lifecycle events only", agent.Runtime, agent.Name)
 		return
 	}
 
-	// Non-blocking: spawn goroutine for discovery
-	go w.discoverAndTail(agent, disc)
-}
-
-func (w *ConversationWatcher) discoverAndTail(agent agents.Agent, disc Discoverer) {
 	result, err := disc.FindConversations(agent.Name, agent.WorkDir)
 	if err != nil {
 		log.Printf("watcher: discovery error for %s: %v", agent.Name, err)
 		return
 	}
 
-	// Watch directories for conversation rotation
-	w.watchDirectories(agent.Name, result.WatchDirs)
+	// Watch directories for conversation rotation (uses per-agent ctx)
+	w.watchDirectories(ctx, agent.Name, result.WatchDirs)
 
 	if len(result.Files) == 0 {
 		log.Printf("watcher: no conversation files found for %s, watching directories", agent.Name)
-		go w.retryDiscovery(agent, disc)
+		go w.retryDiscovery(ctx, agent)
 		return
 	}
 
@@ -221,24 +395,26 @@ func (w *ConversationWatcher) discoverAndTail(agent agents.Agent, disc Discovere
 		// Most recent file is first — it becomes the active conversation.
 		// Only stream the current conversation file; older files are past sessions.
 		currentFile := mainFiles[0]
-		w.startConversationStream(agent, currentFile)
+		w.startConversationStream(ctx, agent, currentFile)
 	}
 
 	// Also start subagent streams
 	for _, f := range result.Files {
 		if f.IsSubagent {
-			w.startConversationStream(agent, f)
+			w.startConversationStream(ctx, agent, f)
 		}
 	}
 }
 
-func (w *ConversationWatcher) startConversationStream(agent agents.Agent, file ConversationFile) {
+func (w *ConversationWatcher) startConversationStream(ctx context.Context, agent agents.Agent, file ConversationFile) {
 	factory, ok := w.parserFactory[file.Runtime]
 	if !ok {
 		return
 	}
 
-	streamCtx, streamCancel := context.WithCancel(w.ctx)
+	// Derive stream context from per-agent ctx (NOT w.ctx) so cancelling
+	// the agent's tailing cancels all its streams.
+	streamCtx, streamCancel := context.WithCancel(ctx)
 
 	tailer, err := NewTailer(streamCtx, file.Path, true)
 	if err != nil {
@@ -273,11 +449,13 @@ func (w *ConversationWatcher) startConversationStream(agent agents.Agent, file C
 		}
 	}
 	w.streams[file.ConversationID] = stream
+	w.convToAgent[file.ConversationID] = agent.Name
+
 	if !file.IsSubagent {
 		oldConvID := w.activeByAgent[agent.Name]
 		w.activeByAgent[agent.Name] = file.ConversationID
 
-		// Clean up orphaned stream from the previous active conversation
+		// Clean up orphaned stream and convToAgent entry from the previous active conversation
 		if oldConvID != "" && oldConvID != file.ConversationID {
 			if oldStream, ok := w.streams[oldConvID]; ok {
 				oldStream.cancel()
@@ -286,6 +464,7 @@ func (w *ConversationWatcher) startConversationStream(agent agents.Agent, file C
 				}
 				delete(w.streams, oldConvID)
 			}
+			delete(w.convToAgent, oldConvID)
 		}
 		w.mu.Unlock()
 
@@ -328,40 +507,7 @@ func (w *ConversationWatcher) pumpFileStream(stream *conversationStream, fs *fil
 	}
 }
 
-func (w *ConversationWatcher) stopWatching(agentName string) {
-	w.mu.Lock()
-	convID, ok := w.activeByAgent[agentName]
-	if !ok {
-		w.mu.Unlock()
-		return
-	}
-	delete(w.activeByAgent, agentName)
-
-	stream, streamOk := w.streams[convID]
-	if streamOk {
-		delete(w.streams, convID)
-	}
-	w.mu.Unlock()
-
-	if streamOk {
-		stream.cancel()
-		for _, fs := range stream.files {
-			fs.tailer.Stop()
-		}
-	}
-
-	// Clean up directory watcher
-	w.mu.Lock()
-	if dw, ok := w.dirWatchers[agentName]; ok {
-		if err := dw.Close(); err != nil {
-			log.Printf("watcher: failed to close dir watcher for %s: %v", agentName, err)
-		}
-		delete(w.dirWatchers, agentName)
-	}
-	w.mu.Unlock()
-}
-
-func (w *ConversationWatcher) watchDirectories(agentName string, dirs []string) {
+func (w *ConversationWatcher) watchDirectories(ctx context.Context, agentName string, dirs []string) {
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		log.Printf("watcher: dir watcher error for %s: %v", agentName, err)
@@ -370,6 +516,7 @@ func (w *ConversationWatcher) watchDirectories(agentName string, dirs []string) 
 
 	for _, dir := range dirs {
 		if err := os.MkdirAll(dir, 0755); err != nil {
+			log.Printf("watcher: failed to create watch directory %s: %v", dir, err)
 			continue
 		}
 		if err := watcher.Add(dir); err != nil {
@@ -386,55 +533,42 @@ func (w *ConversationWatcher) watchDirectories(agentName string, dirs []string) 
 	w.dirWatchers[agentName] = watcher
 	w.mu.Unlock()
 
-	go w.watchDirectoryLoop(agentName, watcher)
+	go w.watchDirectoryLoop(ctx, agentName, watcher)
 }
 
-func (w *ConversationWatcher) watchDirectoryLoop(agentName string, watcher *fsnotify.Watcher) {
+func (w *ConversationWatcher) watchDirectoryLoop(ctx context.Context, agentName string, watcher *fsnotify.Watcher) {
 	for {
 		select {
-		case <-w.ctx.Done():
+		case <-ctx.Done():
 			return
 		case event, ok := <-watcher.Events:
 			if !ok {
 				return
 			}
 			if event.Has(fsnotify.Create) && strings.HasSuffix(event.Name, ".jsonl") {
-				// New conversation file detected — re-discover
-				w.mu.RLock()
-				agent, agentOk := w.findAgentByName(agentName)
-				w.mu.RUnlock()
+				// New conversation file detected — re-discover using latest agent info
+				agent, agentOk := w.registry.GetAgent(agentName)
 				if agentOk {
-					disc, discOk := w.discoverers[agent.Runtime]
-					if discOk {
-						go w.discoverAndTail(agent, disc)
-					}
+					go w.discoverAndTail(ctx, agent)
 				}
 			}
-		case _, ok := <-watcher.Errors:
+		case err, ok := <-watcher.Errors:
 			if !ok {
 				return
 			}
+			log.Printf("watcher: fsnotify error for %s: %v", agentName, err)
 		}
 	}
 }
 
-func (w *ConversationWatcher) findAgentByName(name string) (agents.Agent, bool) {
-	for _, a := range w.registry.GetAgents() {
-		if a.Name == name {
-			return a, true
-		}
-	}
-	return agents.Agent{}, false
-}
-
-func (w *ConversationWatcher) retryDiscovery(agent agents.Agent, disc Discoverer) {
+func (w *ConversationWatcher) retryDiscovery(ctx context.Context, agent agents.Agent) {
 	timer := time.NewTimer(5 * time.Second)
 	defer timer.Stop()
 	select {
-	case <-w.ctx.Done():
+	case <-ctx.Done():
 		return
 	case <-timer.C:
-		w.discoverAndTail(agent, disc)
+		w.discoverAndTail(ctx, agent)
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"log"
+	"regexp"
 	"sync"
 
 	"nhooyr.io/websocket"
@@ -23,14 +24,16 @@ type outputSub struct {
 
 // Client represents a single WebSocket connection.
 type Client struct {
-	conn       *websocket.Conn
-	server     *Server
-	send       chan outMsg
-	agentSub   bool                     // subscribed to agent lifecycle
-	outputSubs map[string]outputSub     // agent name -> subscription
-	mu         sync.Mutex
-	ctx        context.Context
-	cancel     context.CancelFunc
+	conn                 *websocket.Conn
+	server               *Server
+	send                 chan outMsg
+	agentSub             bool                 // subscribed to agent lifecycle
+	includeSessionFilter *regexp.Regexp       // nil = no include filter
+	excludeSessionFilter *regexp.Regexp       // nil = no exclude filter
+	outputSubs           map[string]outputSub // agent name -> subscription
+	mu                   sync.Mutex
+	ctx                  context.Context
+	cancel               context.CancelFunc
 }
 
 // NewClient creates a new WebSocket client.

@@ -1,6 +1,7 @@
 package agents
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/gastownhall/tmux-adapter/internal/tmux"
@@ -10,8 +11,7 @@ import (
 type mockControl struct {
 	sessions    []tmux.SessionInfo
 	panes       map[string]tmux.PaneInfo
-	envVars     map[string]map[string]string // session -> key -> value
-	notifCh     chan tmux.Notification
+	notifCh chan tmux.Notification
 	listErr     error
 	paneInfoErr map[string]error
 }
@@ -19,8 +19,7 @@ type mockControl struct {
 func newMockControl() *mockControl {
 	return &mockControl{
 		panes:       make(map[string]tmux.PaneInfo),
-		envVars:     make(map[string]map[string]string),
-		notifCh:     make(chan tmux.Notification, 10),
+		notifCh: make(chan tmux.Notification, 10),
 		paneInfoErr: make(map[string]error),
 	}
 }
@@ -41,13 +40,6 @@ func (m *mockControl) GetPaneInfo(session string) (tmux.PaneInfo, error) {
 		return tmux.PaneInfo{}, nil
 	}
 	return pane, nil
-}
-
-func (m *mockControl) ShowEnvironment(session, key string) (string, error) {
-	if env, ok := m.envVars[session]; ok {
-		return env[key], nil
-	}
-	return "", nil
 }
 
 func (m *mockControl) Notifications() <-chan tmux.Notification {
@@ -86,12 +78,13 @@ func TestScanNoSessions(t *testing.T) {
 	}
 }
 
-func TestScanNonGastownSessionsSkipped(t *testing.T) {
+func TestScanNonAgentSessionsIgnored(t *testing.T) {
 	mock := newMockControl()
 	mock.sessions = []tmux.SessionInfo{
 		{Name: "random-session", Attached: false},
 		{Name: "my-terminal", Attached: true},
 	}
+	// No pane info set — DetectRuntime returns "" for empty commands
 	r := NewRegistry(mock, "", nil)
 
 	if err := r.scan(); err != nil {
@@ -100,7 +93,7 @@ func TestScanNonGastownSessionsSkipped(t *testing.T) {
 
 	agents := r.GetAgents()
 	if len(agents) != 0 {
-		t.Fatalf("expected 0 agents, got %d", len(agents))
+		t.Fatalf("expected 0 agents (no agent processes), got %d", len(agents))
 	}
 }
 
@@ -160,6 +153,51 @@ func TestScanDetectsAgents(t *testing.T) {
 	for _, e := range events {
 		if e.Type != "added" {
 			t.Fatalf("expected 'added' event, got %q", e.Type)
+		}
+	}
+}
+
+func TestScanDetectsStandaloneAgents(t *testing.T) {
+	mock := newMockControl()
+	mock.sessions = []tmux.SessionInfo{
+		{Name: "my-project", Attached: false},
+		{Name: "research", Attached: true},
+	}
+	mock.panes["my-project"] = tmux.PaneInfo{
+		Command: "claude",
+		PID:     "100",
+		WorkDir: "/home/user/code/my-project",
+	}
+	mock.panes["research"] = tmux.PaneInfo{
+		Command: "gemini",
+		PID:     "200",
+		WorkDir: "/home/user/code/research",
+	}
+
+	// No workDirFilter — scan all sessions
+	r := NewRegistry(mock, "", nil)
+	if err := r.scan(); err != nil {
+		t.Fatalf("scan() error: %v", err)
+	}
+
+	agents := r.GetAgents()
+	if len(agents) != 2 {
+		t.Fatalf("expected 2 agents, got %d", len(agents))
+	}
+
+	// Verify runtimes
+	for _, a := range agents {
+		switch a.Name {
+		case "my-project":
+			if a.Runtime != "claude" {
+				t.Fatalf("expected runtime 'claude' for my-project, got %q", a.Runtime)
+			}
+		case "research":
+			if a.Runtime != "gemini" {
+				t.Fatalf("expected runtime 'gemini' for research, got %q", a.Runtime)
+			}
+		default:
+			t.Fatalf("unexpected agent: %q", a.Name)
 		}
 	}
 }
@@ -239,6 +277,45 @@ func TestScanAgentUpdatedAttachState(t *testing.T) {
 	}
 }
 
+func TestScanAgentUpdatedRuntime(t *testing.T) {
+	mock := newMockControl()
+	mock.sessions = []tmux.SessionInfo{
+		{Name: "my-session", Attached: false},
+	}
+	mock.panes["my-session"] = tmux.PaneInfo{
+		Command: "claude",
+		PID:     "100",
+		WorkDir: "/tmp/work",
+	}
+
+	r := NewRegistry(mock, "", nil)
+	if err := r.scan(); err != nil {
+		t.Fatalf("first scan() error: %v", err)
+	}
+	drainEvents(r)
+
+	// Change the command to gemini (runtime change in same session)
+	mock.panes["my-session"] = tmux.PaneInfo{
+		Command: "gemini",
+		PID:     "200",
+		WorkDir: "/tmp/work",
+	}
+	if err := r.scan(); err != nil {
+		t.Fatalf("second scan() error: %v", err)
+	}
+
+	events := drainEvents(r)
+	if len(events) != 1 {
+		t.Fatalf("expected 1 updated event, got %d", len(events))
+	}
+	if events[0].Type != "updated" {
+		t.Fatalf("expected 'updated' event, got %q", events[0].Type)
+	}
+	if events[0].Agent.Runtime != "gemini" {
+		t.Fatalf("expected runtime 'gemini', got %q", events[0].Agent.Runtime)
+	}
+}
+
 func TestScanNoEventWhenUnchanged(t *testing.T) {
 	mock := newMockControl()
 	mock.sessions = []tmux.SessionInfo{
@@ -267,51 +344,15 @@ func TestScanNoEventWhenUnchanged(t *testing.T) {
 	}
 }
 
-func TestScanEnvVarOverrides(t *testing.T) {
+func TestScanWorkDirFilters(t *testing.T) {
 	mock := newMockControl()
 	mock.sessions = []tmux.SessionInfo{
-		{Name: "hq-witness", Attached: false},
+		{Name: "my-agent", Attached: false},
 	}
-	mock.panes["hq-witness"] = tmux.PaneInfo{
-		Command: "gemini",
-		PID:     "100",
-		WorkDir: "/tmp/gt/work",
-	}
-	mock.envVars["hq-witness"] = map[string]string{
-		"GT_AGENT": "gemini",
-		"GT_ROLE":  "custom-role",
-		"GT_RIG":   "custom-rig",
-	}
-
-	r := NewRegistry(mock, "/tmp/gt", nil)
-	if err := r.scan(); err != nil {
-		t.Fatalf("scan() error: %v", err)
-	}
-
-	agent, ok := r.GetAgent("hq-witness")
-	if !ok {
-		t.Fatal("expected to find agent hq-witness")
-	}
-	if agent.Role != "custom-role" {
-		t.Fatalf("expected role 'custom-role', got %q", agent.Role)
-	}
-	if agent.Rig == nil || *agent.Rig != "custom-rig" {
-		t.Fatalf("expected rig 'custom-rig', got %v", agent.Rig)
-	}
-	if agent.Runtime != "gemini" {
-		t.Fatalf("expected runtime 'gemini', got %q", agent.Runtime)
-	}
-}
-
-func TestScanGtDirFilters(t *testing.T) {
-	mock := newMockControl()
-	mock.sessions = []tmux.SessionInfo{
-		{Name: "hq-witness", Attached: false},
-	}
-	mock.panes["hq-witness"] = tmux.PaneInfo{
+	mock.panes["my-agent"] = tmux.PaneInfo{
 		Command: "claude",
 		PID:     "100",
-		WorkDir: "/other/dir/work", // doesn't match gtDir
+		WorkDir: "/other/dir/work", // doesn't match workDirFilter
 	}
 
 	r := NewRegistry(mock, "/tmp/gt", nil)
@@ -322,6 +363,35 @@ func TestScanGtDirFilters(t *testing.T) {
 	agents := r.GetAgents()
 	if len(agents) != 0 {
 		t.Fatalf("expected 0 agents (workdir mismatch), got %d", len(agents))
+	}
+}
+
+func TestScanEmptyWorkDirFindsAll(t *testing.T) {
+	mock := newMockControl()
+	mock.sessions = []tmux.SessionInfo{
+		{Name: "agent-a", Attached: false},
+		{Name: "agent-b", Attached: false},
+	}
+	mock.panes["agent-a"] = tmux.PaneInfo{
+		Command: "claude",
+		PID:     "100",
+		WorkDir: "/home/user/project-a",
+	}
+	mock.panes["agent-b"] = tmux.PaneInfo{
+		Command: "gemini",
+		PID:     "200",
+		WorkDir: "/opt/other/project-b",
+	}
+
+	// Empty workDirFilter = scan all
+	r := NewRegistry(mock, "", nil)
+	if err := r.scan(); err != nil {
+		t.Fatalf("scan() error: %v", err)
+	}
+
+	agents := r.GetAgents()
+	if len(agents) != 2 {
+		t.Fatalf("expected 2 agents (no workdir filter), got %d", len(agents))
 	}
 }
 
@@ -348,13 +418,32 @@ func TestGetAgent(t *testing.T) {
 	if agent.Name != "hq-overseer" {
 		t.Fatalf("expected name 'hq-overseer', got %q", agent.Name)
 	}
-	if agent.Role != "overseer" {
-		t.Fatalf("expected role 'overseer', got %q", agent.Role)
+	if agent.Runtime != "claude" {
+		t.Fatalf("expected runtime 'claude', got %q", agent.Runtime)
 	}
 
 	_, ok = r.GetAgent("nonexistent")
 	if ok {
 		t.Fatal("expected not to find nonexistent agent")
+	}
+}
+
+func TestCount(t *testing.T) {
+	mock := newMockControl()
+	mock.sessions = []tmux.SessionInfo{
+		{Name: "agent-1", Attached: false},
+		{Name: "agent-2", Attached: false},
+	}
+	mock.panes["agent-1"] = tmux.PaneInfo{Command: "claude", PID: "100", WorkDir: "/tmp"}
+	mock.panes["agent-2"] = tmux.PaneInfo{Command: "gemini", PID: "200", WorkDir: "/tmp"}
+
+	r := NewRegistry(mock, "", nil)
+	if err := r.scan(); err != nil {
+		t.Fatalf("scan() error: %v", err)
+	}
+
+	if r.Count() != 2 {
+		t.Fatalf("expected Count() = 2, got %d", r.Count())
 	}
 }
 
@@ -464,4 +553,109 @@ func TestWatchLoopStopsOnClosedChannel(t *testing.T) {
 	// If it spins, the test would hang or consume CPU, but there's no direct assertion
 	// for goroutine exit. The key correctness property is tested by the fact that
 	// this test completes without spinning.
+}
+
+func TestScanWorkDirPrefixCollision(t *testing.T) {
+	mock := newMockControl()
+	mock.sessions = []tmux.SessionInfo{
+		{Name: "agent-1", Attached: false},
+	}
+	mock.panes["agent-1"] = tmux.PaneInfo{
+		Command: "claude",
+		PID:     "100",
+		WorkDir: "/tmp/gt-other", // prefix matches /tmp/gt but is a different directory
+	}
+
+	r := NewRegistry(mock, "/tmp/gt", nil)
+	if err := r.scan(); err != nil {
+		t.Fatalf("scan() error: %v", err)
+	}
+
+	agents := r.GetAgents()
+	if len(agents) != 0 {
+		t.Fatalf("expected 0 agents (prefix collision), got %d", len(agents))
+	}
+}
+
+func TestScanWorkDirExactMatch(t *testing.T) {
+	mock := newMockControl()
+	mock.sessions = []tmux.SessionInfo{
+		{Name: "agent-1", Attached: false},
+	}
+	mock.panes["agent-1"] = tmux.PaneInfo{
+		Command: "claude",
+		PID:     "100",
+		WorkDir: "/tmp/gt",
+	}
+
+	r := NewRegistry(mock, "/tmp/gt", nil)
+	if err := r.scan(); err != nil {
+		t.Fatalf("scan() error: %v", err)
+	}
+
+	agents := r.GetAgents()
+	if len(agents) != 1 {
+		t.Fatalf("expected 1 agent (exact match), got %d", len(agents))
+	}
+}
+
+func TestScanWorkDirSubdirMatch(t *testing.T) {
+	mock := newMockControl()
+	mock.sessions = []tmux.SessionInfo{
+		{Name: "agent-1", Attached: false},
+	}
+	mock.panes["agent-1"] = tmux.PaneInfo{
+		Command: "claude",
+		PID:     "100",
+		WorkDir: "/tmp/gt/work",
+	}
+
+	r := NewRegistry(mock, "/tmp/gt", nil)
+	if err := r.scan(); err != nil {
+		t.Fatalf("scan() error: %v", err)
+	}
+
+	agents := r.GetAgents()
+	if len(agents) != 1 {
+		t.Fatalf("expected 1 agent (subdir match), got %d", len(agents))
+	}
+}
+
+func TestScanManySessionsDoesNotBlock(t *testing.T) {
+	mock := newMockControl()
+	for i := range 150 {
+		name := fmt.Sprintf("agent-%d", i)
+		mock.sessions = append(mock.sessions, tmux.SessionInfo{Name: name, Attached: false})
+		mock.panes[name] = tmux.PaneInfo{
+			Command: "claude",
+			PID:     fmt.Sprintf("%d", 1000+i),
+			WorkDir: "/tmp/gt/work",
+		}
+	}
+
+	r := NewRegistry(mock, "/tmp/gt", nil)
+
+	// scan() must not block even with no consumer — events beyond the
+	// channel buffer (100) are dropped with a log message.
+	if err := r.scan(); err != nil {
+		t.Fatalf("scan() error: %v", err)
+	}
+
+	// Drain whatever made it into the buffered channel
+	var received []RegistryEvent
+	for {
+		select {
+		case e := <-r.events:
+			received = append(received, e)
+		default:
+			goto done
+		}
+	}
+done:
+
+	// We should get exactly the buffer size (100) since there was no
+	// concurrent consumer and 150 > 100.
+	if len(received) != 100 {
+		t.Fatalf("expected 100 events (channel buffer size), got %d", len(received))
+	}
 }

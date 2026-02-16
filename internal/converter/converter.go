@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -14,6 +15,7 @@ import (
 	"github.com/gastownhall/tmux-adapter/internal/agents"
 	"github.com/gastownhall/tmux-adapter/internal/conv"
 	"github.com/gastownhall/tmux-adapter/internal/tmux"
+	"github.com/gastownhall/tmux-adapter/internal/wsbase"
 	"github.com/gastownhall/tmux-adapter/internal/wsconv"
 	"github.com/gastownhall/tmux-adapter/web"
 )
@@ -25,15 +27,15 @@ type Converter struct {
 	watcher       *conv.ConversationWatcher
 	wsSrv         *wsconv.Server
 	httpSrv       *http.Server
-	gtDir         string
+	workDirFilter string
 	listen        string
 	debugServeDir string
 }
 
 // New creates a new Converter.
-func New(gtDir, listen, debugServeDir string) *Converter {
+func New(workDirFilter, listen, debugServeDir string) *Converter {
 	return &Converter{
-		gtDir:         gtDir,
+		workDirFilter: workDirFilter,
 		listen:        listen,
 		debugServeDir: debugServeDir,
 	}
@@ -48,7 +50,7 @@ func (c *Converter) Start() error {
 	c.ctrl = ctrl
 	log.Println("converter: connected to tmux control mode")
 
-	c.registry = agents.NewRegistry(ctrl, c.gtDir, []string{"converter-monitor"})
+	c.registry = agents.NewRegistry(ctrl, c.workDirFilter, []string{"converter-monitor"})
 
 	if err := c.registry.Start(); err != nil {
 		ctrl.Close()
@@ -93,20 +95,32 @@ func (c *Converter) Start() error {
 	mux.HandleFunc("/conversations", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		convs := c.watcher.ListConversations()
-		data, _ := json.Marshal(convs)
-		_, _ = w.Write(data)
+		data, err := json.Marshal(convs)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("marshal error: %v", err), http.StatusInternalServerError)
+			return
+		}
+		if _, err := w.Write(data); err != nil {
+			log.Printf("converter: failed to write response: %v", err)
+		}
 	})
 	mux.HandleFunc("/ws", c.wsSrv.HandleWebSocket)
 
 	// Serve embedded converter web component files at /tmux-converter-web/
-	converterFS, _ := fs.Sub(web.Files, "tmux-converter-web")
-	mux.Handle("/tmux-converter-web/", corsHandler(
+	converterFS, err := fs.Sub(web.Files, "tmux-converter-web")
+	if err != nil {
+		return fmt.Errorf("embedded converter assets: %w", err)
+	}
+	mux.Handle("/tmux-converter-web/", wsbase.CorsHandler(
 		http.StripPrefix("/tmux-converter-web/", http.FileServer(http.FS(converterFS))),
 	))
 
 	// Serve shared dashboard files at /shared/
-	sharedFS, _ := fs.Sub(web.Files, "shared")
-	mux.Handle("/shared/", corsHandler(
+	sharedFS, err := fs.Sub(web.Files, "shared")
+	if err != nil {
+		return fmt.Errorf("embedded shared assets: %w", err)
+	}
+	mux.Handle("/shared/", wsbase.CorsHandler(
 		http.StripPrefix("/shared/", http.FileServer(http.FS(sharedFS))),
 	))
 
@@ -115,15 +129,19 @@ func (c *Converter) Start() error {
 		mux.Handle("/", http.FileServer(http.Dir(c.debugServeDir)))
 	}
 
+	ln, err := net.Listen("tcp", c.listen)
+	if err != nil {
+		return fmt.Errorf("converter listen: %w", err)
+	}
+	log.Printf("converter listening on %s", c.listen)
+
 	c.httpSrv = &http.Server{
-		Addr:    c.listen,
 		Handler: mux,
 	}
 
 	go func() {
-		log.Printf("converter listening on %s", c.listen)
-		if err := c.httpSrv.ListenAndServe(); err != http.ErrServerClosed {
-			log.Fatalf("converter http server: %v", err)
+		if err := c.httpSrv.Serve(ln); err != http.ErrServerClosed {
+			log.Printf("converter http server error: %v", err)
 		}
 	}()
 
@@ -147,10 +165,3 @@ func (c *Converter) Stop() {
 	log.Println("converter: shutdown complete")
 }
 
-func corsHandler(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Cache-Control", "no-store")
-		next.ServeHTTP(w, r)
-	})
-}

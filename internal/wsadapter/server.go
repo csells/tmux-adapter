@@ -2,6 +2,7 @@ package wsadapter
 
 import (
 	"context"
+	"encoding/json"
 	"log"
 	"net/http"
 	"strings"
@@ -69,17 +70,45 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.RemoveClient(client)
 }
 
-// BroadcastToAgentSubscribers sends a message to all clients subscribed to agent lifecycle events.
-func (s *Server) BroadcastToAgentSubscribers(msg []byte) {
+// BroadcastToAgentSubscribers sends a lifecycle event to subscribed clients,
+// filtered per-client by session name regex. For added/removed events, also
+// broadcasts an agents-count event to ALL subscribed clients (unfiltered) so
+// dashboards can show totals. Skips agents-count for agent-updated events.
+func (s *Server) BroadcastToAgentSubscribers(agentName string, eventType string, msg []byte) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	// agents-count event: only on added/removed, not on updated
+	var countData []byte
+	if eventType != "agent-updated" {
+		total := s.registry.Count()
+		countResp := Response{Type: "agents-count", TotalAgents: &total}
+		var err error
+		countData, err = json.Marshal(countResp)
+		if err != nil {
+			log.Printf("wsadapter: failed to marshal agents-count: %v", err)
+			return
+		}
+	}
 
 	for client := range s.clients {
 		client.mu.Lock()
 		subscribed := client.agentSub
+		include := client.includeSessionFilter
+		exclude := client.excludeSessionFilter
 		client.mu.Unlock()
 
-		if subscribed {
+		if !subscribed {
+			continue
+		}
+
+		// agents-count to all subscribed clients (only on added/removed)
+		if countData != nil {
+			client.SendText(countData)
+		}
+
+		// Lifecycle event only if agent passes this client's filter
+		if wsbase.PassesFilter(agentName, include, exclude) {
 			client.SendText(msg)
 		}
 	}

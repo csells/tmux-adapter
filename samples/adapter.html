@@ -7,20 +7,34 @@
 <link rel="stylesheet" href="/shared/styles.css">
 <style>
   /* Adapter-specific styles */
-  .badge-role { color: #0d1117; }
   .badge-attached { background: #1f6feb33; color: #58a6ff; }
 
-  /* Role colors */
-  .role-mayor    { background: #da3633; }
-  .role-deacon   { background: #a371f7; }
-  .role-overseer { background: #58a6ff; }
-  .role-witness  { background: #3fb950; }
-  .role-refinery { background: #d29922; }
-  .role-crew     { background: #f778ba; }
-  .role-polecat  { background: #79c0ff; }
-  .role-boot     { background: #8b949e; }
+  /* Runtime pill colors */
+  .badge.badge-runtime { background: #6e768133; color: #8b949e; }
+  .badge.runtime-claude  { background: #1f6feb33; color: #58a6ff; }
+  .badge.runtime-gemini  { background: #23863633; color: #3fb950; }
+  .badge.runtime-codex   { background: #d2992233; color: #d29922; }
+  .badge.runtime-cursor  { background: #1b7c8333; color: #39d2e0; }
+  .badge.runtime-auggie  { background: #f778ba33; color: #f778ba; }
+  .badge.runtime-amp     { background: #da363333; color: #f85149; }
+  .badge.runtime-opencode { background: #6e768133; color: #8b949e; }
 
   .agent-name { flex-wrap: wrap; }
+
+  /* Filter bar */
+  .filter-bar { padding: 8px; border-bottom: 1px solid #30363d; }
+  .filter-row { display: flex; align-items: center; gap: 4px; margin-bottom: 4px; }
+  .filter-row:last-of-type { margin-bottom: 0; }
+  .filter-label { font-size: 10px; color: #8b949e; width: 50px; flex-shrink: 0; text-transform: uppercase; letter-spacing: 0.3px; }
+  .filter-input { flex: 1; background: #0d1117; border: 1px solid #30363d; border-radius: 4px; color: #c9d1d9; font-family: 'Monaco', 'Menlo', 'Consolas', monospace; font-size: 12px; padding: 4px 6px; outline: none; min-width: 0; }
+  .filter-input:focus { border-color: #58a6ff; }
+  .filter-input.error { border-color: #f85149; }
+  .filter-clear { background: none; border: none; color: #8b949e; font-size: 14px; cursor: pointer; padding: 2px 4px; line-height: 1; flex-shrink: 0; }
+  .filter-clear:hover { color: #c9d1d9; }
+  .filter-error { font-size: 10px; color: #f85149; margin: 2px 0 2px 54px; display: none; }
+  .filter-error.visible { display: block; }
+  .agent-count { font-size: 11px; color: #8b949e; padding: 4px 0 0 0; }
+  .agent-workdir { font-size: 10px; color: #484f58; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
   .output-wrap {
     flex: 1;
@@ -52,6 +66,21 @@
     <div class="sidebar-header">
       <button type="button" class="sidebar-close" id="sidebar-close" aria-label="Close agents drawer">×</button>
       <span class="sidebar-title">Agents</span>
+    </div>
+    <div class="filter-bar" id="filter-bar">
+      <div class="filter-row">
+        <span class="filter-label">Include</span>
+        <input type="text" class="filter-input" id="filter-include" placeholder="regex" spellcheck="false" autocomplete="off">
+        <button type="button" class="filter-clear" id="filter-include-clear" aria-label="Clear include filter">&times;</button>
+      </div>
+      <div id="filter-include-error" class="filter-error"></div>
+      <div class="filter-row">
+        <span class="filter-label">Exclude</span>
+        <input type="text" class="filter-input" id="filter-exclude" placeholder="regex" spellcheck="false" autocomplete="off">
+        <button type="button" class="filter-clear" id="filter-exclude-clear" aria-label="Clear exclude filter">&times;</button>
+      </div>
+      <div id="filter-exclude-error" class="filter-error"></div>
+      <div class="agent-count" id="agent-count"></div>
     </div>
     <div class="agent-list" id="agent-list">
       <div class="agent-list-state"><span class="spinner"></span><span>Loading agents...</span></div>
@@ -103,6 +132,9 @@ var agentsLoading = true;
 var agentsLoadTimedOut = false;
 var agentsLoadTimer = null;
 var AgentsLoadTimeoutMs = 7000;
+var totalAgents = null;
+var filterDebounceTimer = null;
+var FilterStorageKey = 'tmux-adapter-filter';
 
 // --- DOM refs ---
 var agentListEl  = document.getElementById('agent-list');
@@ -116,6 +148,13 @@ var sidebarCloseBtn = document.getElementById('sidebar-close');
 var drawerBackdropEl = document.getElementById('drawer-backdrop');
 var kbToggleBtn = document.getElementById('kb-toggle');
 var kbActive = false;
+var filterIncludeEl = document.getElementById('filter-include');
+var filterExcludeEl = document.getElementById('filter-exclude');
+var filterIncludeClearEl = document.getElementById('filter-include-clear');
+var filterExcludeClearEl = document.getElementById('filter-exclude-clear');
+var filterIncludeErrorEl = document.getElementById('filter-include-error');
+var filterExcludeErrorEl = document.getElementById('filter-exclude-error');
+var agentCountEl = document.getElementById('agent-count');
 
 // --- Mobile keyboard toggle ---
 var isTouchDevice = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
@@ -319,6 +358,74 @@ function hideAllTerminals() {
   placeholderEl.style.display = '';
 }
 
+// --- Filter logic ---
+function getFilterValues() {
+  return { include: filterIncludeEl.value, exclude: filterExcludeEl.value };
+}
+
+function loadFilter() {
+  try {
+    var stored = localStorage.getItem(FilterStorageKey);
+    if (!stored) return;
+    var f = JSON.parse(stored);
+    if (f.include) filterIncludeEl.value = f.include;
+    if (f.exclude) filterExcludeEl.value = f.exclude;
+  } catch (e) { console.warn('localStorage error:', e); }
+}
+
+function saveFilter() {
+  try {
+    localStorage.setItem(FilterStorageKey, JSON.stringify(getFilterValues()));
+  } catch (e) { console.warn('localStorage error:', e); }
+}
+
+function clearFilterErrors() {
+  filterIncludeErrorEl.textContent = '';
+  filterIncludeErrorEl.classList.remove('visible');
+  filterIncludeEl.classList.remove('error');
+  filterExcludeErrorEl.textContent = '';
+  filterExcludeErrorEl.classList.remove('visible');
+  filterExcludeEl.classList.remove('error');
+}
+
+function sendSubscribeAgents() {
+  var f = getFilterValues();
+  var msg = { type: 'subscribe-agents' };
+  if (f.include) msg.includeSessionFilter = f.include;
+  if (f.exclude) msg.excludeSessionFilter = f.exclude;
+  clearFilterErrors();
+  send(msg);
+}
+
+function onFilterInput() {
+  clearTimeout(filterDebounceTimer);
+  filterDebounceTimer = setTimeout(function() {
+    saveFilter();
+    sendSubscribeAgents();
+  }, 300);
+}
+
+function updateAgentCount() {
+  var shown = agents.size;
+  if (totalAgents !== null && totalAgents !== shown) {
+    agentCountEl.textContent = shown + ' of ' + totalAgents + ' agents';
+  } else {
+    agentCountEl.textContent = shown + ' agents';
+  }
+}
+
+loadFilter();
+filterIncludeEl.addEventListener('input', onFilterInput);
+filterExcludeEl.addEventListener('input', onFilterInput);
+filterIncludeClearEl.addEventListener('click', function() {
+  filterIncludeEl.value = '';
+  onFilterInput();
+});
+filterExcludeClearEl.addEventListener('click', function() {
+  filterExcludeEl.value = '';
+  onFilterInput();
+});
+
 // --- WebSocket ---
 function connect() {
   var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -336,7 +443,7 @@ function connect() {
     if (agents.size === 0) {
       startAgentsLoading();
     }
-    send({ type: 'subscribe-agents' });
+    sendSubscribeAgents();
 
     // Re-subscribe to selected agent's output on reconnect
     if (selectedAgent) {
@@ -376,15 +483,32 @@ function send(obj) {
 function handleJsonMessage(msg) {
   switch (msg.type) {
     case 'subscribe-agents':
+      if (msg.ok === false) {
+        var errText = msg.error || 'Invalid filter';
+        if (errText.indexOf('includeSessionFilter') !== -1) {
+          filterIncludeErrorEl.textContent = errText;
+          filterIncludeErrorEl.classList.add('visible');
+          filterIncludeEl.classList.add('error');
+        } else if (errText.indexOf('excludeSessionFilter') !== -1) {
+          filterExcludeErrorEl.textContent = errText;
+          filterExcludeErrorEl.classList.add('visible');
+          filterExcludeEl.classList.add('error');
+        }
+        break;
+      }
       agents.clear();
       if (msg.agents) msg.agents.forEach(function(a) { agents.set(a.name, a); });
+      if (msg.totalAgents !== undefined) totalAgents = msg.totalAgents;
       markAgentsLoaded();
       renderAgentList();
+      updateAgentCount();
       break;
 
     case 'agent-added':
       if (msg.agent) agents.set(msg.agent.name, msg.agent);
+      if (msg.totalAgents !== undefined) totalAgents = msg.totalAgents;
       renderAgentList();
+      updateAgentCount();
       break;
 
     case 'agent-removed':
@@ -395,13 +519,21 @@ function handleJsonMessage(msg) {
         if (el) el.remove(); // disconnectedCallback handles cleanup
         if (selectedAgent === removedName) deselectAgent();
       }
+      if (msg.totalAgents !== undefined) totalAgents = msg.totalAgents;
       renderAgentList();
+      updateAgentCount();
       break;
 
     case 'agent-updated':
       if (msg.agent) agents.set(msg.agent.name, msg.agent);
       renderAgentList();
+      updateAgentCount();
       if (msg.agent && msg.agent.name === selectedAgent) updateHeader();
+      break;
+
+    case 'agents-count':
+      if (msg.totalAgents !== undefined) totalAgents = msg.totalAgents;
+      updateAgentCount();
       break;
 
     case 'subscribe-output':
@@ -453,7 +585,6 @@ function renderAgentList() {
     // Name row
     var nameRow = document.createElement('div');
     nameRow.className = 'agent-name';
-    nameRow.appendChild(createBadge(agent.role || '?', 'badge badge-role role-' + (agent.role || 'boot')));
     var nameSpan = document.createElement('span');
     nameSpan.textContent = agent.name;
     nameRow.appendChild(nameSpan);
@@ -462,11 +593,20 @@ function renderAgentList() {
     // Meta row
     var metaRow = document.createElement('div');
     metaRow.className = 'agent-meta';
-    metaRow.appendChild(createBadge(agent.runtime || '?', 'badge-runtime'));
+    metaRow.appendChild(createBadge(agent.runtime || '?', 'badge badge-runtime runtime-' + (agent.runtime || 'unknown')));
     if (agent.attached) {
       metaRow.appendChild(createBadge('attached', 'badge badge-attached'));
     }
     card.appendChild(metaRow);
+
+    // WorkDir
+    if (agent.workDir) {
+      var wdRow = document.createElement('div');
+      wdRow.className = 'agent-workdir';
+      wdRow.textContent = agent.workDir;
+      wdRow.title = agent.workDir;
+      card.appendChild(wdRow);
+    }
 
     agentListEl.appendChild(card);
   });
@@ -525,14 +665,13 @@ function updateHeader() {
   if (!agent) return;
 
   clearChildren(headerContentEl);
-  headerContentEl.appendChild(createBadge(agent.role || '?', 'badge badge-role role-' + (agent.role || 'boot')));
 
   var label = document.createElement('span');
   label.className = 'agent-label';
   label.textContent = agent.name;
   headerContentEl.appendChild(label);
 
-  headerContentEl.appendChild(createBadge(agent.runtime || '?', 'badge-runtime'));
+  headerContentEl.appendChild(createBadge(agent.runtime || '?', 'badge badge-runtime runtime-' + (agent.runtime || 'unknown')));
 
   if (agent.attached) {
     headerContentEl.appendChild(createBadge('attached', 'badge badge-attached'));

@@ -15,25 +15,27 @@ type RegistryEvent struct {
 
 // Registry tracks live agents and emits lifecycle events.
 type Registry struct {
-	ctrl         ControlModeInterface
-	mu           sync.RWMutex
-	agents       map[string]Agent // name -> agent
-	events       chan RegistryEvent
-	gtDir        string
-	skipSessions []string
-	stopCh       chan struct{}
+	ctrl          ControlModeInterface
+	mu            sync.RWMutex
+	agents        map[string]Agent // name -> agent
+	events        chan RegistryEvent
+	workDirFilter string
+	skipSessions  []string
+	stopCh        chan struct{}
+	stopOnce      sync.Once
 }
 
 // NewRegistry creates a new agent registry.
+// workDirFilter restricts detection to agents with matching workdir prefix (empty = all).
 // skipSessions lists tmux session names to ignore during scanning (e.g., monitor sessions).
-func NewRegistry(ctrl ControlModeInterface, gtDir string, skipSessions []string) *Registry {
+func NewRegistry(ctrl ControlModeInterface, workDirFilter string, skipSessions []string) *Registry {
 	return &Registry{
-		ctrl:         ctrl,
-		agents:       make(map[string]Agent),
-		events:       make(chan RegistryEvent, 100),
-		gtDir:        gtDir,
-		skipSessions: skipSessions,
-		stopCh:       make(chan struct{}),
+		ctrl:          ctrl,
+		agents:        make(map[string]Agent),
+		events:        make(chan RegistryEvent, 100),
+		workDirFilter: workDirFilter,
+		skipSessions:  skipSessions,
+		stopCh:        make(chan struct{}),
 	}
 }
 
@@ -49,9 +51,11 @@ func (r *Registry) Start() error {
 	return nil
 }
 
-// Stop halts the registry watcher.
+// Stop halts the registry watcher. Safe to call multiple times.
 func (r *Registry) Stop() {
-	close(r.stopCh)
+	r.stopOnce.Do(func() {
+		close(r.stopCh)
+	})
 }
 
 // Events returns the channel for receiving lifecycle events.
@@ -79,6 +83,13 @@ func (r *Registry) GetAgent(name string) (Agent, bool) {
 	return a, ok
 }
 
+// Count returns the number of currently tracked agents.
+func (r *Registry) Count() int {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return len(r.agents)
+}
+
 func (r *Registry) shouldSkip(sessionName string) bool {
 	return slices.Contains(r.skipSessions, sessionName)
 }
@@ -95,7 +106,7 @@ func (r *Registry) watchLoop() {
 			switch notif.Type {
 			case "sessions-changed", "window-renamed":
 				// sessions-changed: session created/destroyed
-				// window-renamed: agent set terminal title (e.g., Claude Code → "2.1.42")
+				// window-renamed: agent set terminal title (e.g., Claude Code -> "2.1.42")
 				if err := r.scan(); err != nil {
 					log.Printf("agent scan error: %v", err)
 				}
@@ -114,10 +125,6 @@ func (r *Registry) scan() error {
 	discovered := make(map[string]Agent)
 
 	for _, sess := range sessions {
-		if !IsGastownSession(sess.Name) {
-			continue
-		}
-
 		// Skip monitor sessions (e.g., adapter-monitor, converter-monitor)
 		if r.shouldSkip(sess.Name) {
 			continue
@@ -130,63 +137,20 @@ func (r *Registry) scan() error {
 			continue
 		}
 
-		// Read agent environment variables
-		agentName, _ := r.ctrl.ShowEnvironment(sess.Name, "GT_AGENT")
-		agentRole, _ := r.ctrl.ShowEnvironment(sess.Name, "GT_ROLE")
-		agentRig, _ := r.ctrl.ShowEnvironment(sess.Name, "GT_RIG")
-
-		// Determine process names to check
-		processNames := GetProcessNames(agentName)
-
-		// Check if agent is alive — the agent is the CLI app, not the session.
-		// Detection priority (from gastown spec):
-		// 1. Direct pane command match
-		// 2. Shell wrapping agent → check descendants
-		// 3. Unrecognized command (version-as-argv[0]) → check binary, then descendants
-		alive := false
-		if IsAgentProcess(pane.Command, processNames) {
-			alive = true
-		} else if IsShell(pane.Command) && pane.PID != "" {
-			alive = CheckDescendants(pane.PID, processNames)
-		} else if pane.PID != "" {
-			alive = CheckProcessBinary(pane.PID, processNames) || CheckDescendants(pane.PID, processNames)
-		}
-
-		if !alive {
-			continue
-		}
-
-		// Validate workDir against gtDir if set
-		if r.gtDir != "" && !strings.HasPrefix(pane.WorkDir, r.gtDir) {
-			// This session's working directory doesn't belong to our gastown instance
-			continue
-		}
-
-		// Determine role and rig from session name (env vars override if available)
-		role, rig := ParseSessionName(sess.Name)
-		if agentRole != "" {
-			role = agentRole
-		}
-		if agentRig != "" {
-			rig = agentRig
-		}
-
-		// Runtime is the agent preset name; infer from binary if not set
-		runtime := agentName
+		// Full 3-tier detection across all known runtimes
+		runtime := DetectRuntime(pane.Command, pane.PID)
 		if runtime == "" {
-			runtime = InferRuntime(pane.Command, pane.PID)
+			continue // no known agent process found
 		}
 
-		var rigPtr *string
-		if rig != "" {
-			rigPtr = &rig
+		// Optional workdir filter
+		if r.workDirFilter != "" && pane.WorkDir != r.workDirFilter && !strings.HasPrefix(pane.WorkDir, r.workDirFilter+"/") {
+			continue
 		}
 
 		discovered[sess.Name] = Agent{
 			Name:     sess.Name,
-			Role:     role,
 			Runtime:  runtime,
-			Rig:      rigPtr,
 			WorkDir:  pane.WorkDir,
 			Attached: sess.Attached,
 		}
@@ -210,7 +174,9 @@ func (r *Registry) scan() error {
 		if !existed {
 			r.agents[name] = newAgent
 			pendingEvents = append(pendingEvents, RegistryEvent{Type: "added", Agent: newAgent})
-		} else if oldAgent.Attached != newAgent.Attached {
+		} else if oldAgent.Attached != newAgent.Attached ||
+			oldAgent.Runtime != newAgent.Runtime ||
+			oldAgent.WorkDir != newAgent.WorkDir {
 			r.agents[name] = newAgent
 			pendingEvents = append(pendingEvents, RegistryEvent{Type: "updated", Agent: newAgent})
 		}
@@ -219,7 +185,11 @@ func (r *Registry) scan() error {
 
 	// Send events outside the lock to avoid deadlocking GetAgents() callers
 	for _, event := range pendingEvents {
-		r.events <- event
+		select {
+		case r.events <- event:
+		default:
+			log.Printf("registry: dropping event %s for agent %s (channel full)", event.Type, event.Agent.Name)
+		}
 	}
 
 	return nil

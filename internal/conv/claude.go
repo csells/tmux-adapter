@@ -3,6 +3,7 @@ package conv
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"time"
 )
 
@@ -210,7 +211,9 @@ func (p *ClaudeParser) parseAssistantMessage(line claudeRawLine, ts time.Time, e
 func (p *ClaudeParser) parseProgress(line claudeRawLine, ts time.Time, eventID string) ([]ConversationEvent, error) {
 	var data claudeProgressData
 	if line.Data != nil {
-		_ = json.Unmarshal(line.Data, &data)
+		if err := json.Unmarshal(line.Data, &data); err != nil {
+			log.Printf("claude: failed to unmarshal progress data: %v", err)
+		}
 	}
 
 	meta := map[string]any{}
@@ -344,7 +347,8 @@ func (p *ClaudeParser) extractToolResultContent(raw json.RawMessage) string {
 func (p *ClaudeParser) parseTimestamp(ts string) time.Time {
 	t, err := time.Parse(time.RFC3339Nano, ts)
 	if err != nil {
-		return time.Now()
+		log.Printf("claude: failed to parse timestamp %q: %v", ts, err)
+		return time.Time{}
 	}
 	return t
 }
