@@ -646,8 +646,21 @@ export class TmuxConverterWeb extends HTMLElement {
   getFilters() {
     return {
       excludeThinking: this.#showThinkingEl ? !this.#showThinkingEl.checked : false,
-      excludeProgress: this.#showProgressEl ? !this.#showProgressEl.checked : true
+      excludeProgress: this.#showProgressEl ? !this.#showProgressEl.checked : true,
+      showToolInput: this.#showToolInputEl ? this.#showToolInputEl.checked : true,
+      showToolOutput: this.#showToolOutputEl ? this.#showToolOutputEl.checked : true
     };
+  }
+
+  setFilters(filters) {
+    if (this.#showThinkingEl && filters.excludeThinking !== undefined)
+      this.#showThinkingEl.checked = !filters.excludeThinking;
+    if (this.#showProgressEl && filters.excludeProgress !== undefined)
+      this.#showProgressEl.checked = !filters.excludeProgress;
+    if (this.#showToolInputEl && filters.showToolInput !== undefined)
+      this.#showToolInputEl.checked = filters.showToolInput;
+    if (this.#showToolOutputEl && filters.showToolOutput !== undefined)
+      this.#showToolOutputEl.checked = filters.showToolOutput;
   }
 
   // --- DOM construction ---
@@ -749,10 +762,16 @@ export class TmuxConverterWeb extends HTMLElement {
       });
     });
 
-    // Client-only filters (tool input, tool output) just re-render
+    // Client-only filters (tool input, tool output) re-render + dispatch for persistence
     var clientFilterEls = [this.#showToolInputEl, this.#showToolOutputEl];
     clientFilterEls.forEach(function(el) {
-      el.addEventListener('change', function() { self.#reRenderEvents(); });
+      el.addEventListener('change', function() {
+        self.#reRenderEvents();
+        self.dispatchEvent(new CustomEvent('client-filter-change', {
+          bubbles: true,
+          detail: self.getFilters()
+        }));
+      });
     });
 
     // Auto-resize textarea

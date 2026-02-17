@@ -132,6 +132,7 @@ var totalAgents = null;
 var filterDebounceTimer = null;
 var pendingChunks = null; // {events: [], total: int} when receiving chunked snapshot
 var FilterStorageKey = 'tmux-converter-filter';
+var EventFilterStorageKey = 'tmux-converter-event-filter';
 
 // --- DOM refs ---
 var agentListEl = document.getElementById('agent-list');
@@ -210,9 +211,14 @@ converterEl.addEventListener('converter-send', async function(e) {
 });
 
 converterEl.addEventListener('filter-change', function(e) {
+  saveEventFilter();
   if (selectedAgent && handshakeDone) {
     send({ type: 'follow-agent', agent: selectedAgent, filter: e.detail });
   }
+});
+
+converterEl.addEventListener('client-filter-change', function() {
+  saveEventFilter();
 });
 
 // --- Filter logic ---
@@ -243,6 +249,20 @@ function loadFilter() {
 function saveFilter() {
   try {
     localStorage.setItem(FilterStorageKey, JSON.stringify(getFilterValues()));
+  } catch (e) { console.warn('localStorage error:', e); }
+}
+
+function loadEventFilter() {
+  try {
+    var stored = localStorage.getItem(EventFilterStorageKey);
+    if (!stored) return;
+    converterEl.setFilters(JSON.parse(stored));
+  } catch (e) { console.warn('localStorage error:', e); }
+}
+
+function saveEventFilter() {
+  try {
+    localStorage.setItem(EventFilterStorageKey, JSON.stringify(converterEl.getFilters()));
   } catch (e) { console.warn('localStorage error:', e); }
 }
 
@@ -302,6 +322,7 @@ function updateAgentCount() {
 }
 
 loadFilter();
+loadEventFilter();
 [filterNameIncludeEl, filterNameExcludeEl, filterPathIncludeEl, filterPathExcludeEl].forEach(function(el) {
   el.addEventListener('input', onFilterInput);
 });
