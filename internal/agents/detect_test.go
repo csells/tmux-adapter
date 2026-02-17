@@ -191,3 +191,33 @@ func TestDetectRuntime_Tier2_ShellNoAgentDescendants(t *testing.T) {
 		t.Fatalf("DetectRuntime(\"bash\", \"12345\") = %q, want \"\"", got)
 	}
 }
+
+func TestCheckProcessBinaryNotFound(t *testing.T) {
+	// PID 999999999 almost certainly doesn't exist
+	got := CheckProcessBinary("999999999", []string{"node", "claude"})
+	if got {
+		t.Fatal("CheckProcessBinary with non-existent PID should return false")
+	}
+}
+
+func TestCheckProcessBinaryEmptyPID(t *testing.T) {
+	got := CheckProcessBinary("", []string{"node", "claude"})
+	if got {
+		t.Fatal("CheckProcessBinary with empty PID should return false")
+	}
+}
+
+func TestDetectRuntimeUnknownProcess(t *testing.T) {
+	// Mock descendants to return non-agent processes
+	old := collectDescendantNamesFunc
+	collectDescendantNamesFunc = func(pid string) []string { return []string{"python", "vim"} }
+	defer func() { collectDescendantNamesFunc = old }()
+
+	// "mystery-proc" is not a shell and not a known agent.
+	// Tier 1: no match. Tier 2: not a shell. Tier 3: CheckProcessBinary
+	// fails for non-existent PID, descendants don't match.
+	got := DetectRuntime("mystery-proc", "999999999")
+	if got != "" {
+		t.Fatalf("DetectRuntime(\"mystery-proc\", \"999999999\") = %q, want \"\"", got)
+	}
+}

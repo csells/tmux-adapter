@@ -355,7 +355,7 @@ func (c *Client) handleFollowAgent(msg clientMessage) {
 		ConversationSupported: convSupported,
 	})
 
-	go c.streamLiveWithContext(sub, buf, subCtx)
+	go c.streamLiveWithContext(sub.id, sub.live, sub.conversationID, subCtx)
 }
 
 func (c *Client) handleUnsubscribe(msg clientMessage) {
@@ -508,7 +508,7 @@ func (c *Client) deliverConversationStarted(we conv.WatcherEvent) {
 				Cursor:         cursor,
 			})
 
-			go c.streamLiveWithContext(sub, buf, subCtx)
+			go c.streamLiveWithContext(sub.id, sub.live, sub.conversationID, subCtx)
 		}
 	}
 
@@ -552,7 +552,7 @@ func (c *Client) deliverConversationStarted(we conv.WatcherEvent) {
 			Cursor:         cursor,
 		})
 
-		go c.streamLiveWithContext(pendingSub, buf, subCtx)
+		go c.streamLiveWithContext(pendingSub.id, pendingSub.live, pendingSub.conversationID, subCtx)
 	}
 }
 
@@ -615,31 +615,31 @@ func (c *Client) deliverConversationSwitch(we conv.WatcherEvent) {
 		Reason:         "switch",
 	})
 
-	go c.streamLiveWithContext(sub, newBuf, subCtx)
+	go c.streamLiveWithContext(sub.id, sub.live, sub.conversationID, subCtx)
 }
 
 func (c *Client) streamLive(sub *subscription, buf *conv.ConversationBuffer) {
-	c.streamLiveWithContext(sub, buf, c.ctx)
+	c.streamLiveWithContext(sub.id, sub.live, sub.conversationID, c.ctx)
 }
 
-func (c *Client) streamLiveWithContext(sub *subscription, _ *conv.ConversationBuffer, ctx context.Context) {
+func (c *Client) streamLiveWithContext(subID string, live <-chan conv.ConversationEvent, conversationID string, ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case event, ok := <-sub.live:
+		case event, ok := <-live:
 			if !ok {
 				return
 			}
 			cursor := conv.Cursor{
-				ConversationID: sub.conversationID,
+				ConversationID: conversationID,
 				Seq:            event.Seq,
 				EventID:        event.EventID,
 			}
 			c.sendJSON(serverMessage{
 				Type:           "conversation-event",
-				SubscriptionID: sub.id,
-				ConversationID: sub.conversationID,
+				SubscriptionID: subID,
+				ConversationID: conversationID,
 				Event:          &event,
 				Cursor:         encodeCursor(cursor),
 			})

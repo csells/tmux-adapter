@@ -3,6 +3,7 @@ package conv
 import (
 	"bufio"
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -259,5 +260,322 @@ func TestClaudeParserRealSamples(t *testing.T) {
 	}
 	if totalEvents == 0 {
 		t.Fatal("no events parsed from sample file")
+	}
+}
+
+func TestClaudeParserRuntime(t *testing.T) {
+	parser := NewClaudeParser("test-agent", "claude:test-agent:abc123")
+	if got := parser.Runtime(); got != "claude" {
+		t.Fatalf("Runtime() = %q, want %q", got, "claude")
+	}
+}
+
+func TestClaudeParserReset(t *testing.T) {
+	parser := NewClaudeParser("test-agent", "claude:test-agent:abc123")
+	// Reset should not panic — that's the only contract.
+	parser.Reset()
+}
+
+func TestTruncateContent(t *testing.T) {
+	// Under MaxContentSize — returned as-is
+	short := "hello"
+	if got := truncateContent(short); got != short {
+		t.Fatalf("truncateContent(%q) = %q, want %q", short, got, short)
+	}
+
+	// Exactly MaxContentSize — returned as-is
+	exact := strings.Repeat("x", MaxContentSize)
+	if got := truncateContent(exact); got != exact {
+		t.Fatalf("truncateContent(len=%d) length = %d, want %d", len(exact), len(got), MaxContentSize)
+	}
+
+	// Over MaxContentSize — truncated
+	big := strings.Repeat("y", MaxContentSize+100)
+	got := truncateContent(big)
+	if len(got) != MaxContentSize {
+		t.Fatalf("truncateContent(len=%d) length = %d, want %d", len(big), len(got), MaxContentSize)
+	}
+}
+
+func TestExtractToolResultContentArray(t *testing.T) {
+	parser := NewClaudeParser("test-agent", "claude:test-agent:abc123")
+
+	// tool_result with content as array of blocks (the array-of-blocks path)
+	raw := []byte(`{"type":"user","uuid":"u3","timestamp":"2026-02-14T01:45:01.076Z","message":{"role":"user","content":[{"tool_use_id":"toolu_456","type":"tool_result","content":[{"type":"text","text":"result from array"}]}]}}`)
+	events, err := parser.Parse(raw)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("got %d events, want 1", len(events))
+	}
+	e := events[0]
+	if e.Type != EventToolResult {
+		t.Fatalf("Type = %q, want %q", e.Type, EventToolResult)
+	}
+	if e.Content[0].Output != "result from array" {
+		t.Fatalf("Output = %q, want %q", e.Content[0].Output, "result from array")
+	}
+}
+
+func TestParseAssistantNilMessage(t *testing.T) {
+	parser := NewClaudeParser("test-agent", "claude:test-agent:abc123")
+
+	raw := []byte(`{"type":"assistant","uuid":"a-nil","timestamp":"2026-02-14T01:45:00.000Z"}`)
+	events, err := parser.Parse(raw)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if events != nil {
+		t.Fatalf("got %d events, want nil for assistant with nil message", len(events))
+	}
+}
+
+func TestParseUserNilMessage(t *testing.T) {
+	parser := NewClaudeParser("test-agent", "claude:test-agent:abc123")
+
+	raw := []byte(`{"type":"user","uuid":"u-nil","timestamp":"2026-02-14T01:45:00.000Z"}`)
+	events, err := parser.Parse(raw)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if events != nil {
+		t.Fatalf("got %d events, want nil for user with nil message", len(events))
+	}
+}
+
+func TestParseUserStringContent(t *testing.T) {
+	parser := NewClaudeParser("test-agent", "claude:test-agent:abc123")
+
+	// User message with content as a plain string (not array)
+	raw := []byte(`{"type":"user","uuid":"u-str","timestamp":"2026-02-14T01:44:54.253Z","message":{"role":"user","content":"plain text message"}}`)
+	events, err := parser.Parse(raw)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("got %d events, want 1", len(events))
+	}
+	if events[0].Type != EventUser {
+		t.Fatalf("Type = %q, want %q", events[0].Type, EventUser)
+	}
+	if len(events[0].Content) != 1 || events[0].Content[0].Text != "plain text message" {
+		t.Fatalf("Content = %+v, want single text block", events[0].Content)
+	}
+}
+
+func TestParseAssistantEmptyContent(t *testing.T) {
+	parser := NewClaudeParser("test-agent", "claude:test-agent:abc123")
+
+	// Assistant message with empty content array → nil
+	raw := []byte(`{"type":"assistant","uuid":"a-empty","timestamp":"2026-02-14T01:45:00.000Z","message":{"role":"assistant","content":[]}}`)
+	events, err := parser.Parse(raw)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if events != nil {
+		t.Fatalf("got %d events, want nil for empty content", len(events))
+	}
+}
+
+func TestParseParentEventID(t *testing.T) {
+	parser := NewClaudeParser("test-agent", "claude:test-agent:abc123")
+
+	raw := []byte(`{"type":"user","uuid":"u-child","parentUuid":"u-parent","timestamp":"2026-02-14T01:44:54.253Z","message":{"role":"user","content":"reply"}}`)
+	events, err := parser.Parse(raw)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("got %d events, want 1", len(events))
+	}
+	if events[0].ParentEventID != "u-parent" {
+		t.Fatalf("ParentEventID = %q, want %q", events[0].ParentEventID, "u-parent")
+	}
+}
+
+func TestParseProgressNoData(t *testing.T) {
+	parser := NewClaudeParser("test-agent", "claude:test-agent:abc123")
+
+	// Progress event with no data field
+	raw := []byte(`{"type":"progress","uuid":"p-nodata","timestamp":"2026-02-14T01:44:54.307Z"}`)
+	events, err := parser.Parse(raw)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("got %d events, want 1", len(events))
+	}
+	if events[0].Type != EventProgress {
+		t.Fatalf("Type = %q, want %q", events[0].Type, EventProgress)
+	}
+	// Metadata should be empty (no data fields set)
+	if len(events[0].Metadata) != 0 {
+		t.Fatalf("Metadata = %v, want empty", events[0].Metadata)
+	}
+}
+
+func TestParseQueueOpNoContent(t *testing.T) {
+	parser := NewClaudeParser("test-agent", "claude:test-agent:abc123")
+
+	raw := []byte(`{"type":"queue-operation","operation":"dequeue","timestamp":"2026-02-14T01:44:54.458Z","sessionId":"abc"}`)
+	events, err := parser.Parse(raw)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("got %d events, want 1", len(events))
+	}
+	if events[0].Metadata["operation"] != "dequeue" {
+		t.Fatalf("operation = %v, want %q", events[0].Metadata["operation"], "dequeue")
+	}
+	// content key should not be in metadata when empty
+	if _, ok := events[0].Metadata["content"]; ok {
+		t.Fatal("Metadata should not include 'content' when it's empty")
+	}
+}
+
+func TestParseMessageIDFallback(t *testing.T) {
+	parser := NewClaudeParser("test-agent", "claude:test-agent:abc123")
+
+	// When uuid is absent, messageId is used as EventID
+	raw := []byte(`{"type":"user","messageId":"msg-123","timestamp":"2026-02-14T01:44:54.253Z","message":{"role":"user","content":"hi"}}`)
+	events, err := parser.Parse(raw)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("got %d events, want 1", len(events))
+	}
+	if events[0].EventID != "msg-123" {
+		t.Fatalf("EventID = %q, want %q", events[0].EventID, "msg-123")
+	}
+}
+
+func TestParseAssistantMultipleBlocks(t *testing.T) {
+	parser := NewClaudeParser("test-agent", "claude:test-agent:abc123")
+
+	// Assistant message with both text and tool_use → should be EventAssistant (not tool_use since >1 block)
+	raw := []byte(`{"type":"assistant","uuid":"a-multi","timestamp":"2026-02-14T01:45:00.000Z","message":{"role":"assistant","content":[{"type":"text","text":"Let me read that file."},{"type":"tool_use","id":"toolu_789","name":"Read","input":{"path":"/tmp/foo"}}]}}`)
+	events, err := parser.Parse(raw)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("got %d events, want 1", len(events))
+	}
+	if events[0].Type != EventAssistant {
+		t.Fatalf("Type = %q, want %q (multiple blocks)", events[0].Type, EventAssistant)
+	}
+	if len(events[0].Content) != 2 {
+		t.Fatalf("Content blocks = %d, want 2", len(events[0].Content))
+	}
+}
+
+func TestParseCacheUsage(t *testing.T) {
+	parser := NewClaudeParser("test-agent", "claude:test-agent:abc123")
+
+	raw := []byte(`{"type":"assistant","uuid":"a-cache","timestamp":"2026-02-14T01:45:00.000Z","message":{"role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":50,"output_tokens":20,"cache_read_input_tokens":30,"cache_creation_input_tokens":10}}}`)
+	events, err := parser.Parse(raw)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("got %d events, want 1", len(events))
+	}
+	u := events[0].TokenUsage
+	if u == nil {
+		t.Fatal("TokenUsage is nil")
+	}
+	if u.CacheRead != 30 {
+		t.Fatalf("CacheRead = %d, want 30", u.CacheRead)
+	}
+	if u.CacheCreate != 10 {
+		t.Fatalf("CacheCreate = %d, want 10", u.CacheCreate)
+	}
+}
+
+func TestParseAssistantMalformedMessage(t *testing.T) {
+	parser := NewClaudeParser("test-agent", "claude:test-agent:abc123")
+
+	// message field is not valid JSON for claudeMessage
+	raw := []byte(`{"type":"assistant","uuid":"a-bad","timestamp":"2026-02-14T01:45:00.000Z","message":"not-an-object"}`)
+	events, err := parser.Parse(raw)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("got %d events, want 1 error event", len(events))
+	}
+	if events[0].Type != EventError {
+		t.Fatalf("Type = %q, want %q", events[0].Type, EventError)
+	}
+}
+
+func TestParseUserMalformedMessage(t *testing.T) {
+	parser := NewClaudeParser("test-agent", "claude:test-agent:abc123")
+
+	raw := []byte(`{"type":"user","uuid":"u-bad","timestamp":"2026-02-14T01:45:00.000Z","message":"not-an-object"}`)
+	events, err := parser.Parse(raw)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("got %d events, want 1 error event", len(events))
+	}
+	if events[0].Type != EventError {
+		t.Fatalf("Type = %q, want %q", events[0].Type, EventError)
+	}
+}
+
+func TestParseToolResultWithNilContent(t *testing.T) {
+	parser := NewClaudeParser("test-agent", "claude:test-agent:abc123")
+
+	// tool_result with null content
+	raw := []byte(`{"type":"user","uuid":"u-tnc","timestamp":"2026-02-14T01:45:01.076Z","message":{"role":"user","content":[{"tool_use_id":"toolu_nil","type":"tool_result","content":null}]}}`)
+	events, err := parser.Parse(raw)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("got %d events, want 1", len(events))
+	}
+	if events[0].Content[0].Output != "" {
+		t.Fatalf("Output = %q, want empty for nil content", events[0].Content[0].Output)
+	}
+}
+
+func TestParseContentBlocksEmptyText(t *testing.T) {
+	parser := NewClaudeParser("test-agent", "claude:test-agent:abc123")
+
+	// text block with empty text should be skipped
+	raw := []byte(`{"type":"assistant","uuid":"a-et","timestamp":"2026-02-14T01:45:00.000Z","message":{"role":"assistant","content":[{"type":"text","text":""}]}}`)
+	events, err := parser.Parse(raw)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	// empty text block is skipped, so no blocks → nil events
+	if events != nil {
+		t.Fatalf("got %d events, want nil for empty text block", len(events))
+	}
+}
+
+func TestParseContentBlocksEmptyString(t *testing.T) {
+	parser := NewClaudeParser("test-agent", "claude:test-agent:abc123")
+
+	// content as empty string → no content blocks but still returns a user event
+	raw := []byte(`{"type":"user","uuid":"u-es","timestamp":"2026-02-14T01:44:54.253Z","message":{"role":"user","content":""}}`)
+	events, err := parser.Parse(raw)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("got %d events, want 1", len(events))
+	}
+	if events[0].Type != EventUser {
+		t.Fatalf("Type = %q, want %q", events[0].Type, EventUser)
+	}
+	if len(events[0].Content) != 0 {
+		t.Fatalf("Content len = %d, want 0 for empty string content", len(events[0].Content))
 	}
 }

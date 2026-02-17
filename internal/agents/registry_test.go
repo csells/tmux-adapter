@@ -659,3 +659,105 @@ done:
 		t.Fatalf("expected 100 events (channel buffer size), got %d", len(received))
 	}
 }
+
+func TestRegistryStartAndStop(t *testing.T) {
+	mock := newMockControl()
+	mock.sessions = []tmux.SessionInfo{
+		{Name: "agent-1", Attached: false},
+	}
+	mock.panes["agent-1"] = tmux.PaneInfo{
+		Command: "claude",
+		PID:     "100",
+		WorkDir: "/tmp/work",
+	}
+
+	r := NewRegistry(mock, "", nil)
+
+	// Start performs initial scan
+	if err := r.Start(); err != nil {
+		t.Fatalf("Start() error: %v", err)
+	}
+
+	if r.Count() != 1 {
+		t.Fatalf("expected 1 agent after Start(), got %d", r.Count())
+	}
+
+	event := <-r.Events()
+	if event.Type != "added" {
+		t.Fatalf("expected 'added' event, got %q", event.Type)
+	}
+
+	// Stop is safe to call
+	r.Stop()
+
+	// Stop is idempotent
+	r.Stop()
+}
+
+func TestStartReturnsListSessionsError(t *testing.T) {
+	mock := newMockControl()
+	mock.listErr = fmt.Errorf("tmux not running")
+
+	r := NewRegistry(mock, "", nil)
+	err := r.Start()
+	if err == nil {
+		t.Fatal("expected error from Start() when ListSessions fails")
+	}
+}
+
+func TestScanPaneInfoError(t *testing.T) {
+	mock := newMockControl()
+	mock.sessions = []tmux.SessionInfo{
+		{Name: "agent-1", Attached: false},
+	}
+	mock.paneInfoErr["agent-1"] = fmt.Errorf("pane not found")
+
+	r := NewRegistry(mock, "", nil)
+	if err := r.scan(); err != nil {
+		t.Fatalf("scan() error: %v", err)
+	}
+
+	// Agent should not be detected when pane info fails
+	if r.Count() != 0 {
+		t.Fatalf("expected 0 agents when pane info errors, got %d", r.Count())
+	}
+}
+
+func TestScanAgentUpdatedWorkDir(t *testing.T) {
+	mock := newMockControl()
+	mock.sessions = []tmux.SessionInfo{
+		{Name: "my-agent", Attached: false},
+	}
+	mock.panes["my-agent"] = tmux.PaneInfo{
+		Command: "claude",
+		PID:     "100",
+		WorkDir: "/tmp/project-a",
+	}
+
+	r := NewRegistry(mock, "", nil)
+	if err := r.scan(); err != nil {
+		t.Fatalf("first scan() error: %v", err)
+	}
+	drainEvents(r)
+
+	// Change the workdir (agent cd'd to a different directory)
+	mock.panes["my-agent"] = tmux.PaneInfo{
+		Command: "claude",
+		PID:     "100",
+		WorkDir: "/tmp/project-b",
+	}
+	if err := r.scan(); err != nil {
+		t.Fatalf("second scan() error: %v", err)
+	}
+
+	events := drainEvents(r)
+	if len(events) != 1 {
+		t.Fatalf("expected 1 updated event, got %d", len(events))
+	}
+	if events[0].Type != "updated" {
+		t.Fatalf("expected 'updated' event, got %q", events[0].Type)
+	}
+	if events[0].Agent.WorkDir != "/tmp/project-b" {
+		t.Fatalf("expected workDir '/tmp/project-b', got %q", events[0].Agent.WorkDir)
+	}
+}
