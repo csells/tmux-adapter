@@ -286,39 +286,28 @@ func handleSubscribeOutput(c *Client, req Request) {
 			OK:   &okVal,
 		})
 
-		// Drain any output the agent was already producing — we only want
-		// the controlled redraw.
-		drained := 0
-	drain:
-		for {
-			select {
-			case _, ok := <-ch:
-				if !ok {
-					break drain
-				}
-				drained++
-			default:
-				break drain
-			}
-		}
-		if drained > 0 {
-			log.Printf("subscribe-output(%s): drained %d pre-redraw chunks", req.Agent, drained)
-		}
-
 		// Force a clean redraw. The resize dance triggers SIGWINCH, causing
 		// the app to repaint. pipe-pane captures all output in real-time.
-		log.Printf("subscribe-output(%s): forcing redraw", req.Agent)
+		log.Printf("subscribe-output(%s): waiting for redraw quiescence", req.Agent)
 		c.server.ctrl.ForceRedraw(req.Agent)
 
-		// Let the app finish redrawing; pipe-pane buffers all output in ch.
-		time.Sleep(200 * time.Millisecond)
+		// Wait for output to settle — adaptive quiescence replaces fixed sleep.
+		// Silence threshold: 150ms bridges the 50ms pipe-pane poll + 50ms ForceRedraw gap.
+		// Hard timeout: 1s safety net for continuously-scrolling apps.
+		redrawStart := time.Now()
+		redrawBuf := drainWithQuiescence(ch, 150*time.Millisecond, 1*time.Second)
+		log.Printf("subscribe-output(%s): redraw quiescence reached in %v (%d bytes)", req.Agent, time.Since(redrawStart), len(redrawBuf))
 
 		// Send a minimal 0x05 (clear screen) to trigger the client's reset+reveal.
-		// The actual content comes from pipe-pane data buffered in ch.
 		log.Printf("subscribe-output(%s): sending 0x05 clear-screen trigger", req.Agent)
 		c.SendBinary(agentio.MakeBinaryFrame(agentio.BinaryTerminalSnapshot, req.Agent, []byte("\x1b[2J\x1b[H")))
 
-		// Stream raw bytes in background — immediately flushes buffered pipe-pane data.
+		// Send captured redraw content as a single chunk.
+		if len(redrawBuf) > 0 {
+			c.SendBinary(agentio.MakeBinaryFrame(agentio.BinaryTerminalOutput, req.Agent, redrawBuf))
+		}
+
+		// Stream raw bytes in background — continues from where quiescence left off.
 		go func() {
 			for rawBytes := range ch {
 				c.SendBinary(agentio.MakeBinaryFrame(agentio.BinaryTerminalOutput, req.Agent, rawBytes))
@@ -416,6 +405,41 @@ func MakeAgentEvent(eventType string, agent agents.Agent) ([]byte, error) {
 		return nil, fmt.Errorf("marshal agent event: %w", err)
 	}
 	return data, nil
+}
+
+// drainWithQuiescence reads from ch until no new data arrives for the silence
+// duration, or the hard timeout is exceeded. Returns all accumulated bytes.
+// This replaces a fixed sleep by adapting to actual output speed.
+func drainWithQuiescence(ch <-chan []byte, silence, timeout time.Duration) []byte {
+	var buf []byte
+
+	totalTimer := time.NewTimer(timeout)
+	defer totalTimer.Stop()
+
+	silenceTimer := time.NewTimer(silence)
+	defer silenceTimer.Stop()
+
+	for {
+		select {
+		case chunk, ok := <-ch:
+			if !ok {
+				return buf
+			}
+			buf = append(buf, chunk...)
+			// Reset silence timer — we saw activity
+			if !silenceTimer.Stop() {
+				select {
+				case <-silenceTimer.C:
+				default:
+				}
+			}
+			silenceTimer.Reset(silence)
+		case <-silenceTimer.C:
+			return buf
+		case <-totalTimer.C:
+			return buf
+		}
+	}
 }
 
 // filterAgents returns only agents whose names pass the session filter.
